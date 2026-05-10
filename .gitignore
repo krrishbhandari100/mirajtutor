@@ -1,0 +1,6 @@
+mjtut/
+test.py
+aitutor/node_modules/
+aitutor/.next
+api/__pycache__
+api/*.db
