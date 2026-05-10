@@ -20,7 +20,7 @@ const Page = () => {
   // In a fast audio loop running 60 times a second, 'useState' would crash the app.
   // Refs let us store changing data silently in the background.
   // =====================================================================
-  
+
   // DOM Elements
   const videoRef = useRef(null);       // The <video> tag showing the student
   const tutorInstance = useRef(null);  // The 3D Avatar object
@@ -56,7 +56,7 @@ const Page = () => {
   // CHAPTER 2: STATE (The Visible UI)
   // These variables DO trigger screen refreshes. Use them for UI text, buttons, etc.
   // =====================================================================
-  
+
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isTutorReady, setIsTutorReady] = useState(false);
@@ -123,7 +123,7 @@ const Page = () => {
     if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
     if (tutorCooldownRef.current) clearTimeout(tutorCooldownRef.current);
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    
+
     // Destroy the audio engine parts
     if (processorRef.current) {
       try { processorRef.current.disconnect(); } catch { }
@@ -180,7 +180,7 @@ const Page = () => {
     processor.connect(audioContext.destination);
 
     // 🌟 THE "FIRST SYLLABLE" FIX: Keeps the last split-second of audio in memory
-    let lastAudioChunk = null; 
+    let lastAudioChunk = null;
 
     // 4. The Chopping Loop: Runs constantly as audio flows in
     processor.onaudioprocess = (event) => {
@@ -199,11 +199,11 @@ const Page = () => {
     };
 
     // 5. Isolating Human Voices: Calculate which frequency bins = human speech (300Hz–3400Hz).
-    const sampleRate = audioContext.sampleRate; 
-    const binCount = analyser.frequencyBinCount; 
-    const nyquist = sampleRate / 2;             
-    const speechLowBin = Math.floor(300 / nyquist * binCount);   
-    const speechHighBin = Math.floor(3400 / nyquist * binCount); 
+    const sampleRate = audioContext.sampleRate;
+    const binCount = analyser.frequencyBinCount;
+    const nyquist = sampleRate / 2;
+    const speechLowBin = Math.floor(300 / nyquist * binCount);
+    const speechHighBin = Math.floor(3400 / nyquist * binCount);
     const dataArray = new Uint8Array(binCount);
 
     audioContextRef.current = audioContext;
@@ -213,7 +213,7 @@ const Page = () => {
     // 6. The Volume Loop (Voice Activity Detection): Runs 60 times a second
     const detectSpeech = () => {
       if (!analyserRef.current || !isSessionActiveRef.current) return;
-      
+
       // Look at the current volume of the room
       analyserRef.current.getByteFrequencyData(dataArray);
 
@@ -256,7 +256,7 @@ const Page = () => {
           // 🌟 THE "FIRST SYLLABLE" FIX: Instantly send the memory buffer to the backend!
           if (lastAudioChunk) {
             socket.emit('audio_chunk', lastAudioChunk.buffer);
-            lastAudioChunk = null; 
+            lastAudioChunk = null;
           }
         }
         // If they were about to be marked "silent", cancel it because they kept talking
@@ -433,33 +433,21 @@ const Page = () => {
       setStatusText((prev) => isSessionActiveRef.current ? 'Disconnected' : 'Idle');
     };
 
-     // When Python sends EdgeTTS Audio back!
+    // When Python sends EdgeTTS Audio back!
     const handleAIReply = async (data) => {
       if (sessionStoppedRef.current) return;
-      console.log('🎧 Received ai_reply data:', { 
-        hasText: !!data?.text, 
-        textLength: data?.text?.length || 0,
-        hasAudio: !!data?.audio,
-        audioLength: data?.audio?.length || 0,
-        hasTutorInstance: !!tutorInstance.current,
-        audioPreview: data?.audio?.substring(0, 50) + '...' || 'none'
-      });
-      
+
       if (data?.text) addMessage('AI', data.text);
       if (!data?.audio || !tutorInstance.current) {
-        console.warn('⚠️ Missing audio or tutor instance - not speaking:', { 
-          hasAudio: !!data?.audio, 
-          hasTutorInstance: !!tutorInstance.current 
-        });
         setStatusText('Session active');
         return;
       }
 
       try {
         setStatusText('Tutor speaking...');
-        setTutorSpeaking(true); // Mute mic
+        setTutorSpeaking(true);
 
-        // Convert base64 to AudioBuffer
+        // Decode audio
         const binaryString = atob(data.audio);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
@@ -471,22 +459,8 @@ const Page = () => {
         if (audioCtx.state === 'suspended') await audioCtx.resume();
 
         const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
-        
-        // Validate audio data
-        console.log('🔊 Audio received:', {
-          duration: audioBuffer.duration,
-          sampleRate: audioBuffer.sampleRate,
-          length: audioBuffer.length,
-          isValid: isFinite(audioBuffer.duration) && audioBuffer.duration > 0
-        });
 
-        if (!isFinite(audioBuffer.duration) || audioBuffer.duration <= 0) {
-          console.error('❌ Invalid audio data received from backend');
-          setTutorSpeaking(false); // Unmute mic
-          if (!sessionStoppedRef.current) setStatusText('Session active');
-          return; // Prevent attempting to speak invalid audio
-        }
-
+        // Create audio object with viseme data
         const audioObject = {
           audio: audioBuffer,
           words: data.words || [],
@@ -494,14 +468,14 @@ const Page = () => {
           wdurations: (data.wdurations || []).map((d) => d / 2),
         };
 
-        // Make the avatar talk!
+        // Speak with lip sync
         await tutor.speakAudio(
           audioObject,
           { lipsyncLang: 'en', pcmSampleRate: audioBuffer.sampleRate },
           (subtitle) => { console.log('Subtitle:', subtitle); }
         );
 
-        setTutorSpeaking(false); // Unmute mic
+        setTutorSpeaking(false);
         if (!sessionStoppedRef.current) setStatusText('Session active');
       } catch (error) {
         console.error('Error while tutor speaking:', error);
@@ -571,14 +545,14 @@ const Page = () => {
             </p>
           </div>
           <div className="w-full h-full bg-slate-100">
-           <TalkingTutor
-             avatarPath="/avatars/david.glb"
-             onReady={(instance) => {
-               tutorInstance.current = instance;
-               console.log('🎯 TalkingTutor instance received:', instance);
-               setIsTutorReady(true);
-             }}
-           />
+            <TalkingTutor
+              avatarPath="/avatars/david.glb"
+              onReady={(instance) => {
+                tutorInstance.current = instance;
+                console.log('🎯 TalkingTutor instance received:', instance);
+                setIsTutorReady(true);
+              }}
+            />
           </div>
         </div>
 
