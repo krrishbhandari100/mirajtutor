@@ -156,13 +156,13 @@ active_audio_buffers = {}
 session_contexts = {}
 interruption_flags = {}
 chat_histories = {} 
-# 💥 NEW: The safety lock to prevent phantom mic triggers
-processing_flags = {} 
+processing_flags = {}
+session_board_pages = {}  # { sid: { current: 1, total: 1 } } 
 
 
 async def build_ai_reply_payload(text: str):
     print(f"🔊 Building AI reply payload for text: {text[:50]}...")
-    voice = "en-US-GuyNeural"
+    voice = "hi-IN-MadhurNeural"
     communicate = edge_tts.Communicate(text, voice, boundary="WordBoundary")
 
     audio_data = b""
@@ -203,7 +203,8 @@ async def connect(sid, environ):
     interruption_flags[sid] = False
     session_contexts[sid] = {}
     chat_histories[sid] = [] 
-    processing_flags[sid] = False # Initialize the lock
+    processing_flags[sid] = False
+    session_board_pages[sid] = {"current": 1, "total": 1}
 
     welcome_text = "Hello! Welcome to MirajTutor. I'm your AI tutor. What would you like to learn today?"
     payload = await build_ai_reply_payload(welcome_text)
@@ -218,6 +219,7 @@ async def disconnect(sid):
     session_contexts.pop(sid, None)
     chat_histories.pop(sid, None) 
     processing_flags.pop(sid, None)
+    session_board_pages.pop(sid, None)
 
 
 @sio.event
@@ -323,9 +325,13 @@ async def speech_ended(sid):
         system_prompt = ctx.get('prevCtx', '')
         current_history = chat_histories.get(sid, [])
         
+        board_pages = session_board_pages.get(sid, {"current": 1, "total": 1})
+        board_ctx = f"Page {board_pages['current']} of {board_pages['total']}"
+
         ai_response_text = await asyncio.to_thread(
             generate_tutor_response,
-            '', topic, system_prompt, current_history, user_text
+            '', topic, system_prompt, current_history, user_text,
+            board_context=board_ctx
         )
 
         if not ai_response_text or interruption_flags.get(sid):
@@ -334,7 +340,7 @@ async def speech_ended(sid):
         # --- ROBUST JSON EXTRACTION ---
         speaking_text = ai_response_text 
         clean_json_str = None
-        board_update = {'writingresponse': '', 'visualresponse': None}
+        board_update = {'writingresponse': '', 'visualresponse': None, 'boardresponse': None}
 
         try:
             match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
@@ -344,6 +350,17 @@ async def speech_ended(sid):
                 speaking_text = ai_response.get('speakingresponse', "I am ready to help.")
                 board_update['writingresponse'] = ai_response.get('writingresponse', '')
                 board_update['visualresponse'] = ai_response.get('visualresponse', None)
+                board_update['boardresponse'] = ai_response.get('boardresponse')
+
+                # Track board page changes
+                br = ai_response.get('boardresponse', {})
+                if isinstance(br, dict) and br.get('action') == 'newpage':
+                    session_board_pages[sid]['total'] += 1
+                    session_board_pages[sid]['current'] = session_board_pages[sid]['total']
+                elif isinstance(br, dict) and br.get('action') == 'gotopage':
+                    target = br.get('page', 0)
+                    if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
+                        session_board_pages[sid]['current'] = target
             else:
                 print("⚠️ No JSON block found in AI response!")
                 speaking_text = speaking_text.replace("{", "").replace("}", "").replace('"', '').replace("\\n", " ")

@@ -1,12 +1,24 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VISEMES } from 'wawa-lipsync';
+import { LipsyncEn } from './lipsync-en.mjs';
+
+const lipsync = new LipsyncEn();
+
+const VISEME_TARGETS = [
+  'viseme_sil','viseme_PP','viseme_FF','viseme_TH','viseme_DD','viseme_kk',
+  'viseme_CH','viseme_SS','viseme_nn','viseme_RR','viseme_aa','viseme_E',
+  'viseme_I','viseme_O','viseme_U'
+];
+
+const BOARD_W = 800;
+const BOARD_H = 600;
 
 export default function TalkingTutor({ avatarPath, onReady }) {
   const containerRef = useRef(null);
+  const boardCanvasRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState(null);
 
@@ -19,191 +31,238 @@ export default function TalkingTutor({ avatarPath, onReady }) {
   const gainNodeRef = useRef(null);
   const animationFrameRef = useRef(null);
   const isPlayingRef = useRef(false);
-  const startTimeRef = useRef(0);
+  const audioStartTimeRef = useRef(0);
   const visemeTimelineRef = useRef([]);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  const boardPagesRef = useRef([{ id: 1, commands: [] }]);
+  const currentPageIndexRef = useRef(0);
+  const pageIdCounterRef = useRef(2);
+  const drawTimersRef = useRef([]);
 
-    setIsReady(false);
-    setError(null);
-    containerRef.current.innerHTML = '';
+  const getCtx = useCallback(() => {
+    const canvas = boardCanvasRef.current;
+    return canvas ? canvas.getContext('2d') : null;
+  }, []);
 
-    initAvatarSystem().then(() => {
-      setIsReady(true);
-      if (onReady) {
-        onReady({
-          speakAudio: speakAudio,
-          stop: stopSpeaking,
-          cancelSpeech: cancelSpeaking
-        });
+  function drawCommand(ctx, cmd, cw, ch) {
+    const sx = cw / BOARD_W;
+    const sy = ch / BOARD_H;
+    const color = cmd.color || '#FFFFFF';
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    switch (cmd.type) {
+      case 'header':
+      case 'text': {
+        ctx.font = `bold ${(cmd.size || 20) * sy}px "Segoe UI", Arial, sans-serif`;
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(255,255,255,0.08)';
+        ctx.shadowBlur = 2 * sy;
+        ctx.fillText(cmd.content || '', cmd.x * sx, cmd.y * sy);
+        ctx.shadowBlur = 0;
+        break;
       }
-    }).catch(err => {
-      console.error('❌ Failed to initialize avatar system:', err);
-      setError(err.message);
-    });
-
-    return () => {
-      cancelAnimationFrame(animationFrameRef.current);
-      if (audioSourceRef.current) {
-        try { audioSourceRef.current.stop(); } catch (e) { }
+      case 'line': {
+        ctx.lineWidth = 3 * sy;
+        ctx.beginPath();
+        ctx.moveTo(cmd.x1 * sx, cmd.y1 * sy);
+        ctx.lineTo(cmd.x2 * sx, cmd.y2 * sy);
+        ctx.stroke();
+        break;
       }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(console.error);
+      case 'arrow': {
+        ctx.lineWidth = 3 * sy;
+        const ax = cmd.x1 * sx, ay = cmd.y1 * sy;
+        const bx = cmd.x2 * sx, by = cmd.y2 * sy;
+        const angle = Math.atan2(by - ay, bx - ax);
+        const headLen = 12 * sy;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(bx - headLen * Math.cos(angle - 0.4), by - headLen * Math.sin(angle - 0.4));
+        ctx.lineTo(bx - headLen * Math.cos(angle + 0.4), by - headLen * Math.sin(angle + 0.4));
+        ctx.closePath();
+        ctx.fill();
+        break;
       }
-      if (rendererRef.current && containerRef.current) {
-        containerRef.current.removeChild(rendererRef.current.domElement);
-      }
-    };
-  }, [avatarPath]);
-
-  const initAvatarSystem = async () => {
-    console.log('🚀 Initializing avatar system with three.js + wawa-lipsync');
-
-    // Initialize three.js scene
-    await initThreeJS();
-    await loadAvatarModel(avatarPath);
-    initAudioSystem();
-    startAnimationLoop();
-
-    console.log('✅ Avatar system initialized successfully');
-  };
-
-  const initThreeJS = () => {
-    return new Promise((resolve, reject) => {
-      try {
-        sceneRef.current = new THREE.Scene();
-        // sceneRef.current.background = new THREE.Color(0x1a1a1a);
-
-        cameraRef.current = new THREE.PerspectiveCamera(
-          45,
-          containerRef.current.clientWidth / containerRef.current.clientHeight,
-          0.1,
-          1000
-        );
-        cameraRef.current.position.set(0, 1.5, 3);
-        cameraRef.current.lookAt(0, 1, 0);
-
-        rendererRef.current = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        rendererRef.current.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
-        rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        rendererRef.current.setClearColor(0x000000, 0);
-        containerRef.current.appendChild(rendererRef.current.domElement);
-
-        // 1. Soft ambient light (base illumination)
-        const ambientLight = new THREE.AmbientLight(0xfff5e6, 0.4); // Warm tint
-        sceneRef.current.add(ambientLight);
-
-        // 2. Hemisphere light for natural sky/ground gradient
-        const hemiLight = new THREE.HemisphereLight(0xffeedd, 0x080820, 0.5); // Sky/ground
-        sceneRef.current.add(hemiLight);
-
-        // 3. Key light (main directional - warm sunlight from upper right)
-        const keyLight = new THREE.DirectionalLight(0xfff4e6, 1.2); // Warm white
-        keyLight.position.set(5, 8, 5);
-        keyLight.castShadow = false; // Disable shadows for performance
-        sceneRef.current.add(keyLight);
-
-        // 4. Fill light (softer light from left side to fill shadows)
-        const fillLight = new THREE.DirectionalLight(0xe6f0ff, 0.6); // Cool blue tint
-        fillLight.position.set(-4, 4, 3);
-        sceneRef.current.add(fillLight);
-
-        // 5. Rim light (backlight for edge definition)
-        const rimLight = new THREE.DirectionalLight(0xffffff, 0.4);
-        rimLight.position.set(-2, 5, -5);
-        sceneRef.current.add(rimLight);
-
-        // 6. Bottom fill (prevents dark chin/jaw area)
-        const bottomLight = new THREE.DirectionalLight(0xffeedd, 0.3);
-        bottomLight.position.set(0, -3, 2);
-        sceneRef.current.add(bottomLight);
-
-        resolve();
-      } catch (err) {
-        reject(err);
-      }
-    });
-  };
-
-  const loadAvatarModel = (url) => {
-    return new Promise((resolve, reject) => {
-      const loader = new GLTFLoader();
-
-      loader.load(
-        url,
-        (gltf) => {
-          modelRef.current = gltf.scene || gltf.scenes[0];
-          sceneRef.current.add(modelRef.current);
-
-          const box = new THREE.Box3().setFromObject(modelRef.current);
-          const center = box.getCenter(new THREE.Vector3());
-          const size = box.getSize(new THREE.Vector3());
-
-          modelRef.current.position.x -= center.x;
-          modelRef.current.position.y -= center.y;
-          modelRef.current.position.z -= center.z;
-
-          const maxDim = Math.max(size.x, size.y, size.z);
-          const scaleFactor = 1.8 / maxDim;
-          modelRef.current.scale.setScalar(scaleFactor);
-          modelRef.current.position.y += size.y * 0.4;
-
-          console.log('🤖 Avatar model loaded');
-          resolve();
-        },
-        null,
-        (error) => {
-          reject(new Error(`Failed to load model: ${error.message}`));
+      case 'rect': {
+        ctx.lineWidth = 3 * sy;
+        const rx = cmd.x * sx, ry = cmd.y * sy;
+        const rw = cmd.w * sx, rh = cmd.h * sy;
+        if (cmd.fill) {
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.15;
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.globalAlpha = 1;
         }
-      );
-    });
-  };
-
-  const initAudioSystem = () => {
-    try {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      gainNodeRef.current = audioContextRef.current.createGain();
-      gainNodeRef.current.gain.value = 0.8;
-      gainNodeRef.current.connect(audioContextRef.current.destination);
-      console.log('🔊 Audio system initialized');
-    } catch (err) {
-      console.error('❌ Failed to initialize audio system:', err);
-      throw err;
+        ctx.strokeRect(rx, ry, rw, rh);
+        break;
+      }
+      case 'circle': {
+        ctx.lineWidth = 3 * sy;
+        ctx.beginPath();
+        ctx.arc(cmd.cx * sx, cmd.cy * sy, cmd.r * sx, 0, Math.PI * 2);
+        if (cmd.fill) {
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.15;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        ctx.stroke();
+        break;
+      }
+      case 'curve': {
+        ctx.lineWidth = 3 * sy;
+        const pts = cmd.points || [];
+        if (pts.length >= 4) {
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0] * sx, pts[0][1] * sy);
+          ctx.bezierCurveTo(
+            pts[2][0] * sx, pts[2][1] * sy,
+            pts[3][0] * sx, pts[3][1] * sy,
+            pts[1][0] * sx, pts[1][1] * sy
+          );
+          ctx.stroke();
+        }
+        break;
+      }
     }
-  };
+  }
 
-  // const initWawaLipsync = () => {
-  //   try {
-  //     wawaLipsyncRef.current = new WawaLipsync();
-  //     console.log('👄 Wawa-lipsync initialized');
-  //   } catch (err) {
-  //     console.error('❌ Failed to initialize wawa-lipsync:', err);
-  //     throw err;
-  //   }
-  // };
+  const renderPage = useCallback((pageIndex) => {
+    const ctx = getCtx();
+    const canvas = boardCanvasRef.current;
+    if (!ctx || !canvas) return;
 
-  const startAnimationLoop = () => {
-    const animate = (timestamp) => {
-      // Update visemes during playback
-      if (isPlayingRef.current && audioContextRef.current && visemeTimelineRef.current.length > 0) {
-        const elapsed = (timestamp - startTimeRef.current) / 1000;
-        const visemes = getInterpolatedVisemes(elapsed);
-        applyVisemesToModel(visemes);
+    const pages = boardPagesRef.current;
+    if (pageIndex < 0 || pageIndex >= pages.length) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (const cmd of pages[pageIndex].commands) {
+      drawCommand(ctx, cmd, canvas.width, canvas.height);
+    }
+  }, [getCtx]);
+
+  const scheduleTimedDraws = useCallback((commands) => {
+    drawTimersRef.current.forEach(t => clearTimeout(t));
+    drawTimersRef.current = [];
+
+    const pageIdx = currentPageIndexRef.current;
+    const ctx = audioContextRef.current;
+    const startTime = audioStartTimeRef.current;
+
+    for (const cmd of commands) {
+      const t = cmd.time || 0;
+      if (t > 0 && ctx) {
+        const delay = ((startTime + t) - ctx.currentTime) * 1000;
+        if (delay > 0) {
+          const timer = setTimeout(() => {
+            renderPage(pageIdx);
+          }, delay);
+          drawTimersRef.current.push(timer);
+        }
+      }
+    }
+  }, [renderPage]);
+
+  const drawOnBoard = useCallback((boardresponse) => {
+    if (!boardresponse || typeof boardresponse !== 'object') return;
+
+    const { action, commands } = boardresponse;
+
+    if (action === 'newpage') {
+      boardPagesRef.current.push({ id: pageIdCounterRef.current++, commands: [] });
+      currentPageIndexRef.current = boardPagesRef.current.length - 1;
+    } else if (action === 'gotopage') {
+      const target = Number(boardresponse.page) || 1;
+      if (target >= 1 && target <= boardPagesRef.current.length) {
+        currentPageIndexRef.current = target - 1;
+      }
+    } else if (action === 'erasepage') {
+      boardPagesRef.current[currentPageIndexRef.current].commands = [];
+    }
+
+    if (!commands || !Array.isArray(commands)) {
+      renderPage(currentPageIndexRef.current);
+      return;
+    }
+
+    const page = boardPagesRef.current[currentPageIndexRef.current];
+
+    for (const cmd of commands) {
+      if (cmd.type === 'erase') {
+        if (cmd.target === 'last' && page.commands.length > 0) {
+          page.commands.pop();
+        } else if (cmd.target === 'all') {
+          page.commands = [];
+        } else if (cmd.target === 'index' && typeof cmd.index === 'number') {
+          page.commands.splice(cmd.index, 1);
+        }
+      } else if (cmd.type === 'clear') {
+        page.commands = [];
+      } else {
+        page.commands.push(cmd);
+      }
+    }
+
+    renderPage(currentPageIndexRef.current);
+    scheduleTimedDraws(commands);
+  }, [renderPage, scheduleTimedDraws]);
+
+  const clearBoard = useCallback(() => {
+    boardPagesRef.current[currentPageIndexRef.current].commands = [];
+    renderPage(currentPageIndexRef.current);
+  }, [renderPage]);
+
+  const saveBoardAsImage = useCallback(() => {
+    const canvas = boardCanvasRef.current;
+    if (!canvas) return null;
+    return canvas.toDataURL('image/png');
+  }, []);
+
+  const saveAllPages = useCallback(() => {
+    const pages = boardPagesRef.current;
+    return pages.map((_, idx) => {
+      const offscreen = document.createElement('canvas');
+      offscreen.width = BOARD_W;
+      offscreen.height = BOARD_H;
+      const octx = offscreen.getContext('2d');
+      if (!octx) return null;
+
+      octx.fillStyle = '#1a1a2e';
+      octx.fillRect(0, 0, BOARD_W, BOARD_H);
+
+      for (const cmd of pages[idx].commands) {
+        drawCommand(octx, cmd, BOARD_W, BOARD_H);
       }
 
-      rendererRef.current.render(sceneRef.current, cameraRef.current);
-      animationFrameRef.current = requestAnimationFrame(animate);
-    };
+      return offscreen.toDataURL('image/png');
+    });
+  }, []);
 
-    animationFrameRef.current = requestAnimationFrame(animate);
-  };
+  const navigateToPage = useCallback((n) => {
+    if (n < 1 || n > boardPagesRef.current.length) return;
+    currentPageIndexRef.current = n - 1;
+    renderPage(n - 1);
+  }, [renderPage]);
 
-  const getInterpolatedVisemes = (time) => {
+  const getBoardState = useCallback(() => ({
+    currentPage: currentPageIndexRef.current + 1,
+    totalPages: boardPagesRef.current.length,
+  }), []);
+
+  function getInterpolatedVisemes(time) {
     const timeline = visemeTimelineRef.current;
     if (!timeline || timeline.length === 0) return {};
 
-    // Find surrounding keyframes
     let before = timeline[0];
     let after = timeline[timeline.length - 1];
 
@@ -218,10 +277,8 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     if (time <= before.time) return before.visemes;
     if (time >= after.time) return after.visemes;
 
-    // Interpolate
     const t = (time - before.time) / (after.time - before.time);
     const result = {};
-
     const allKeys = new Set([...Object.keys(before.visemes), ...Object.keys(after.visemes)]);
 
     allKeys.forEach(key => {
@@ -231,128 +288,144 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     });
 
     return result;
-  };
+  }
 
-  const applyVisemesToModel = (visemes) => {
+  function applyVisemesToModel(visemes) {
     if (!modelRef.current) return;
 
     modelRef.current.traverse((child) => {
-      if (child.isMesh && child.morphTargetInfluences) {
-        Object.entries(visemes).forEach(([viseme, weight]) => {
-          // Try direct mapping
-          if (child.morphTargetDictionary && child.morphTargetDictionary[viseme] !== undefined) {
-            child.morphTargetInfluences[child.morphTargetDictionary[viseme]] = weight;
-          }
+      if (!child.isMesh || !child.morphTargetDictionary || !child.morphTargetInfluences) return;
 
-          // Try common mappings
-          const mappings = {
-            'jawOpen': ['DD', 'open'],
-            'mouthClose': ['PP', 'close'],
-            'funnel': ['FF', 'wide'],
-            'sil': ['neutral', 'rest']
-          };
+      const dict = child.morphTargetDictionary;
+      const influences = child.morphTargetInfluences;
 
-          if (mappings[viseme]) {
-            mappings[viseme].forEach(name => {
-              if (child.morphTargetDictionary && child.morphTargetDictionary[name] !== undefined) {
-                child.morphTargetInfluences[child.morphTargetDictionary[name]] = weight;
-              }
-            });
-          }
+      VISEME_TARGETS.forEach(name => {
+        const idx = dict[name];
+        if (idx !== undefined) influences[idx] = 0;
+      });
+      if (dict['jawOpen'] !== undefined) influences[dict['jawOpen']] = 0;
+      if (dict['mouthOpen'] !== undefined) influences[dict['mouthOpen']] = 0;
+
+      Object.entries(visemes).forEach(([key, weight]) => {
+        const w = Math.max(0, Math.min(1, weight || 0));
+        const idx = dict[key];
+        if (idx !== undefined) influences[idx] = w;
+      });
+    });
+  }
+
+  function startAnimationLoop() {
+    const animate = () => {
+      if (isPlayingRef.current && audioContextRef.current && visemeTimelineRef.current.length > 0) {
+        const elapsed = audioContextRef.current.currentTime - audioStartTimeRef.current;
+        const visemes = getInterpolatedVisemes(elapsed);
+        applyVisemesToModel(visemes);
+      }
+      rendererRef.current.render(sceneRef.current, cameraRef.current);
+      animationFrameRef.current = requestAnimationFrame(animate);
+    };
+    animationFrameRef.current = requestAnimationFrame(animate);
+  }
+
+  function initAudioSystem() {
+    try {
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      gainNodeRef.current = audioContextRef.current.createGain();
+      gainNodeRef.current.gain.value = 0.8;
+      gainNodeRef.current.connect(audioContextRef.current.destination);
+    } catch (err) {
+      console.error('Failed to initialize audio system:', err);
+      throw err;
+    }
+  }
+
+  function initThreeJS() {
+    sceneRef.current = new THREE.Scene();
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    sceneRef.current.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(4, 8, 6);
+    sceneRef.current.add(directionalLight);
+
+    const fillLight = new THREE.DirectionalLight(0xaaccff, 0.6);
+    fillLight.position.set(-5, 5, 4);
+    sceneRef.current.add(fillLight);
+
+    cameraRef.current = new THREE.PerspectiveCamera(48, containerRef.current.clientWidth / containerRef.current.clientHeight, 0.1, 100);
+    cameraRef.current.position.set(0, 1.65, 3.4);
+    cameraRef.current.lookAt(0, 1.35, 0);
+
+    rendererRef.current = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    rendererRef.current.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    rendererRef.current.shadowMap.enabled = true;
+
+    containerRef.current.appendChild(rendererRef.current.domElement);
+  }
+
+  function loadAvatarModel(url) {
+    return new Promise((resolve, reject) => {
+      const loader = new GLTFLoader();
+      loader.load(
+        url,
+        (gltf) => {
+          modelRef.current = gltf.scene || gltf.scenes[0];
+          sceneRef.current.add(modelRef.current);
+
+          const box = new THREE.Box3().setFromObject(modelRef.current);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+
+          modelRef.current.position.set(0, 0, 0);
+          modelRef.current.position.x -= center.x;
+          modelRef.current.position.z -= center.z;
+          modelRef.current.position.y = -center.y + 0.1;
+
+          const maxDim = Math.max(size.x, size.y, size.z);
+          modelRef.current.scale.setScalar(2.2 / maxDim);
+
+          resolve();
+        },
+        null,
+        (error) => reject(error)
+      );
+    });
+  }
+
+  function generateVisemeTimeline(words, wtimes, wdurations) {
+    visemeTimelineRef.current = [];
+
+    words.forEach((word, i) => {
+      const wordStart = wtimes[i] || 0;
+      const wordDur = wdurations[i] || 0.25;
+      const result = lipsync.wordsToVisemes(word);
+
+      if (result.visemes.length > 0) {
+        const totalDur = result.times[result.times.length - 1] +
+          result.durations[result.durations.length - 1];
+        const scale = totalDur > 0 ? wordDur / totalDur : 1;
+
+        result.visemes.forEach((viseme, j) => {
+          const t = wordStart + result.times[j] * scale;
+          const d = result.durations[j] * scale;
+          const visemeKey = 'viseme_' + viseme;
+
+          visemeTimelineRef.current.push({
+            time: t,
+            visemes: { [visemeKey]: 1.0, jawOpen: 0.6 }
+          });
+          visemeTimelineRef.current.push({
+            time: t + d * 0.7,
+            visemes: { [visemeKey]: 0.4, jawOpen: 0.2 }
+          });
         });
       }
     });
-  };
+  }
 
-  const speakAudio = async (audioObject, options, callback) => {
-    if (!audioObject || !audioObject.audio) {
-      console.warn('⚠️ No audio data provided');
-      return;
-    }
-
-    try {
-      console.log('🎵 Starting audio playback with lip sync');
-
-      stopSpeaking();
-
-      // const audioBuffer = await audioContextRef.current.decodeAudioData(audioObject.audio);
-      const audioBuffer = audioObject.audio;
-
-      // Generate viseme timeline from word data
-      if (audioObject.words && audioObject.wtimes && audioObject.wdurations) {
-        generateVisemeTimeline(audioObject.words, audioObject.wtimes, audioObject.wdurations);
-      } else {
-        generateSimpleVisemeTimeline(audioBuffer);
-      }
-
-      // Play audio
-      audioSourceRef.current = audioContextRef.current.createBufferSource();
-      audioSourceRef.current.buffer = audioBuffer;
-      audioSourceRef.current.connect(gainNodeRef.current);
-
-      const startTime = audioContextRef.current.currentTime + 0.01;
-      audioSourceRef.current.start(startTime);
-
-      isPlayingRef.current = true;
-      startTimeRef.current = startTime * 1000;
-
-      console.log(`▶️ Playing audio (${audioBuffer.duration.toFixed(2)}s)`);
-
-      audioSourceRef.current.onended = () => {
-        isPlayingRef.current = false;
-        callback && callback(null);
-      };
-
-    } catch (err) {
-      console.error('❌ speakAudio error:', err);
-      throw err;
-    }
-  };
-
-  const generateVisemeTimeline = (words, wtimes, wdurations) => {
-    visemeTimelineRef.current = [];
-
-    // wawa-lipsync VISEMES mapping - typically like:
-    // { A: 'AA', E: 'EH', I: 'IH', O: 'OH', U: 'UH', B: 'PP', F: 'FF', etc. }
-
-    words.forEach((word, i) => {
-      const startTime = wtimes[i] || 0;
-      const duration = wdurations[i] || 0.3;
-      const endTime = startTime + duration;
-
-      // Simple word-to-viseme mapping using VISEMES
-      // This maps the first character(s) to corresponding viseme
-      let viseme = 'sil';
-      const lowerWord = word.toLowerCase();
-
-      // Map to viseme using VISEMES (or fallback to common visemes)
-      if (VISEMES) {
-        // Try to find a matching viseme for the word
-        const firstChar = lowerWord[0];
-        if (VISEMES[firstChar]) {
-          viseme = VISEMES[firstChar];
-        } else {
-          // Try vowel pattern matching
-          if (/[aeiou]/i.test(lowerWord)) viseme = 'AA';
-          else if (/[bpm]/i.test(lowerWord)) viseme = 'PP';
-          else if (/[fvw]/i.test(lowerWord)) viseme = 'FF';
-          else if (/[dtnl]/i.test(lowerWord)) viseme = 'DD';
-          else if (/[kg]/i.test(lowerWord)) viseme = 'kk';
-          else if (/[syz]/i.test(lowerWord)) viseme = 'SS';
-          else if (/[r]/i.test(lowerWord)) viseme = 'RR';
-        }
-      }
-
-      // Add viseme keyframes
-      visemeTimelineRef.current.push({ time: startTime, visemes: { [viseme]: 1.0 } });
-      visemeTimelineRef.current.push({ time: endTime, visemes: { [viseme]: 0.0 } });
-    });
-
-    visemeTimelineRef.current.sort((a, b) => a.time - b.time);
-    console.log(`📊 Generated ${visemeTimelineRef.current.length} viseme keyframes using VISEMES`);
-  };
-
-  const generateSimpleVisemeTimeline = (audioBuffer) => {
+  function generateSimpleVisemeTimeline(audioBuffer) {
     visemeTimelineRef.current = [];
     const sampleRate = audioBuffer.sampleRate;
     const data = audioBuffer.getChannelData(0);
@@ -369,31 +442,146 @@ export default function TalkingTutor({ avatarPath, onReady }) {
 
       visemeTimelineRef.current.push({
         time,
-        visemes: { 'jawOpen': jawOpen, 'sil': 1.0 - jawOpen }
+        visemes: { jawOpen: jawOpen }
       });
     }
-  };
+  }
 
-  const stopSpeaking = () => {
+  function stopSpeaking() {
     if (isPlayingRef.current && audioSourceRef.current) {
       try { audioSourceRef.current.stop(); } catch (e) { }
       isPlayingRef.current = false;
     }
-  };
+    applyVisemesToModel({});
+  }
 
-  const cancelSpeaking = () => {
+  function cancelSpeaking() {
     stopSpeaking();
     visemeTimelineRef.current = [];
-  };
+    applyVisemesToModel({});
+  }
+
+  async function speakAudio(audioObject, options, callback) {
+    if (!audioObject || !audioObject.audio) {
+      console.warn('No audio data provided');
+      return;
+    }
+
+    try {
+      stopSpeaking();
+
+      const audioBuffer = audioObject.audio;
+
+      if (audioObject.words && audioObject.wtimes && audioObject.wdurations) {
+        generateVisemeTimeline(audioObject.words, audioObject.wtimes, audioObject.wdurations);
+      } else {
+        generateSimpleVisemeTimeline(audioBuffer);
+      }
+
+      audioSourceRef.current = audioContextRef.current.createBufferSource();
+      audioSourceRef.current.buffer = audioBuffer;
+      audioSourceRef.current.connect(gainNodeRef.current);
+
+      const startTime = audioContextRef.current.currentTime + 0.01;
+      audioSourceRef.current.start(startTime);
+
+      audioStartTimeRef.current = startTime;
+      isPlayingRef.current = true;
+
+      audioSourceRef.current.onended = () => {
+        isPlayingRef.current = false;
+        applyVisemesToModel({});
+        callback && callback(null);
+      };
+
+    } catch (err) {
+      console.error('speakAudio error:', err);
+      throw err;
+    }
+  }
+
+  function initAvatarSystem() {
+    initThreeJS();
+    return loadAvatarModel(avatarPath).then(() => {
+      initAudioSystem();
+      startAnimationLoop();
+    });
+  }
+
+  const sizeCanvas = useCallback(() => {
+    const canvas = boardCanvasRef.current;
+    if (!canvas) return;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+    const rect = parent.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * window.devicePixelRatio);
+    canvas.height = Math.round(rect.height * window.devicePixelRatio);
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    renderPage(currentPageIndexRef.current);
+  }, [renderPage]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    let cancelled = false;
+    containerRef.current.innerHTML = '';
+
+    initAvatarSystem().then(() => {
+      if (cancelled) return;
+      setIsReady(true);
+      if (onReady) {
+        onReady({
+          speakAudio,
+          stop: stopSpeaking,
+          cancelSpeech: cancelSpeaking,
+          drawOnBoard,
+          clearBoard,
+          saveBoardAsImage,
+          saveAllPages,
+          navigateToPage,
+          getCurrentPage: () => currentPageIndexRef.current + 1,
+          getTotalPages: () => boardPagesRef.current.length,
+          getBoardState,
+        });
+      }
+    }).catch(err => {
+      if (cancelled) return;
+      console.error('Failed to initialize avatar system:', err);
+      setError(err.message);
+    });
+
+    sizeCanvas();
+
+    return () => {
+      cancelled = true;
+      drawTimersRef.current.forEach(t => clearTimeout(t));
+      cancelAnimationFrame(animationFrameRef.current);
+      if (audioSourceRef.current) {
+        try { audioSourceRef.current.stop(); } catch (e) { }
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(console.error);
+      }
+      if (rendererRef.current && containerRef.current) {
+        containerRef.current.removeChild(rendererRef.current.domElement);
+      }
+    };
+  }, [avatarPath]);
 
   return (
-    <div className="w-full h-[600px] rounded-[2rem] overflow-hidden relative shadow-2xl bg-slate-800 bg-[url('/blackboard.jpg')] bg-cover bg-center">
+    <div className="w-full h-[600px] rounded-[2rem] overflow-hidden relative shadow-2xl">
+      <canvas
+        ref={boardCanvasRef}
+        className="absolute inset-0 w-full h-full"
+        style={{ background: '#1a1a2e', display: 'block' }}
+      />
       <div
         ref={containerRef}
         className="pointer-events-none"
-        style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}
+        style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}
       />
-      <div className="absolute inset-0 bg-black/20 pointer-events-none shadow-inner" />
+      <div className="absolute inset-0 bg-black/10 pointer-events-none shadow-inner" style={{ zIndex: 2 }} />
     </div>
   );
 }

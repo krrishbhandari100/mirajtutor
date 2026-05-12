@@ -66,6 +66,25 @@ const Page = () => {
     { sender: 'AI', text: 'Hello! Start the session whenever you are ready.' },
   ]);
 
+  const [isMuted, setIsMuted] = useState(false);
+  const isMutedRef = useRef(false);
+
+  const [boardCurrentPage, setBoardCurrentPage] = useState(1);
+  const [boardTotalPages, setBoardTotalPages] = useState(1);
+  const boardCurrentPageRef = useRef(1);
+  const boardTotalPagesRef = useRef(1);
+
+  const updateBoardPageState = () => {
+    const inst = tutorInstance.current;
+    if (!inst) return;
+    const cp = inst.getCurrentPage?.() || 1;
+    const tp = inst.getTotalPages?.() || 1;
+    boardCurrentPageRef.current = cp;
+    boardTotalPagesRef.current = tp;
+    setBoardCurrentPage(cp);
+    setBoardTotalPages(tp);
+  };
+
   const addMessage = (sender, text) => {
     setMessages((prev) => [...prev, { sender, text }]);
   };
@@ -185,6 +204,7 @@ const Page = () => {
     // 4. The Chopping Loop: Runs constantly as audio flows in
     processor.onaudioprocess = (event) => {
       if (!isSessionActiveRef.current) return;
+      if (isMutedRef.current) return;
 
       const input = event.inputBuffer.getChannelData(0);
       const chunk = new Float32Array(input);
@@ -233,7 +253,23 @@ const Page = () => {
       // Calculate the final target to beat (40% louder than background noise)
       const threshold = Math.max(noiseFloorRef.current * NOISE_MULTIPLIER, 8);
 
-      // Phase B: AI Guard 
+      // Phase B: Mute Guard
+      // If muted, don't send any audio and finalize any in-progress speech
+      if (isMutedRef.current) {
+        if (isSpeakingRef.current) {
+          isSpeakingRef.current = false;
+          setStatusText('Muted');
+          socket.emit('speech_ended');
+        }
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
+        animationFrameRef.current = requestAnimationFrame(detectSpeech);
+        return;
+      }
+
+      // Phase C: AI Guard 
       // If AI is talking, don't listen to anything.
       if (isTutorSpeakingRef.current) {
         if (silenceTimeoutRef.current) {
@@ -330,7 +366,12 @@ const Page = () => {
       addMessage('AI', 'Session started. Speak whenever you want.');
 
       // Tell Python what subject we are learning today
-      const contextPayload = { topic: roomInfo.topic, prevCtx: roomInfo.prevCtx };
+      const contextPayload = {
+        topic: roomInfo.topic,
+        prevCtx: roomInfo.prevCtx,
+        boardCurrentPage: 1,
+        boardTotalPages: 1,
+      };
       if (socket.connected) {
         socket.emit('session_context', contextPayload);
       } else {
@@ -379,6 +420,26 @@ const Page = () => {
     } catch (error) {
       console.error('Error stopping session:', error);
       setStatusText('Stop failed');
+    }
+  };
+
+  const toggleMute = () => {
+    const newMuted = !isMutedRef.current;
+    isMutedRef.current = newMuted;
+    setIsMuted(newMuted);
+    if (newMuted) {
+      setStatusText('Muted');
+      // Finalize any in-progress speech so backend doesn't hang
+      if (isSpeakingRef.current) {
+        isSpeakingRef.current = false;
+        socket.emit('speech_ended');
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    } else {
+      setStatusText('Session active');
     }
   };
 
@@ -464,8 +525,8 @@ const Page = () => {
         const audioObject = {
           audio: audioBuffer,
           words: data.words || [],
-          wtimes: (data.wtimes || []).map((t) => t / 2),
-          wdurations: (data.wdurations || []).map((d) => d / 2),
+          wtimes: data.wtimes || [],
+          wdurations: data.wdurations || [],
         };
 
         // Speak with lip sync
@@ -486,7 +547,11 @@ const Page = () => {
 
     const handleBoardUpdate = (data) => {
       if (sessionStoppedRef.current) return;
-      console.log('Board update received:', data);
+      const inst = tutorInstance.current;
+      if (inst?.drawOnBoard && data?.boardresponse) {
+        inst.drawOnBoard(data.boardresponse);
+      }
+      updateBoardPageState();
     };
 
     socket.off('connect');
@@ -544,15 +609,60 @@ const Page = () => {
               <span className="text-indigo-600">●</span> AI Tutor
             </p>
           </div>
-          <div className="w-full h-full bg-slate-100">
+          <div className="w-full h-full bg-slate-100 relative">
             <TalkingTutor
               avatarPath="/avatars/david.glb"
               onReady={(instance) => {
                 tutorInstance.current = instance;
-                console.log('🎯 TalkingTutor instance received:', instance);
+                console.log('TalkingTutor instance received:', instance);
                 setIsTutorReady(true);
+                updateBoardPageState();
               }}
             />
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 bg-black/50 backdrop-blur-sm rounded-full px-4 py-2 text-white text-sm">
+              <button
+                onClick={() => {
+                  tutorInstance.current?.navigateToPage?.(boardCurrentPage - 1);
+                  updateBoardPageState();
+                }}
+                disabled={boardCurrentPage <= 1}
+                className="disabled:opacity-30 hover:text-indigo-300 transition-colors"
+              >
+                ◀
+              </button>
+              <span className="font-medium min-w-[80px] text-center select-none">
+                {isSessionActive ? `Page ${boardCurrentPage}/${boardTotalPages}` : 'Board'}
+              </span>
+              <button
+                onClick={() => {
+                  tutorInstance.current?.navigateToPage?.(boardCurrentPage + 1);
+                  updateBoardPageState();
+                }}
+                disabled={boardCurrentPage >= boardTotalPages}
+                className="disabled:opacity-30 hover:text-indigo-300 transition-colors"
+              >
+                ▶
+              </button>
+              <span className="w-px h-4 bg-white/20 mx-1" />
+              <button
+                onClick={() => {
+                  const inst = tutorInstance.current;
+                  if (!inst?.saveAllPages) return;
+                  const pages = inst.saveAllPages();
+                  if (!pages || pages.length === 0) return;
+                  pages.forEach((dataURL, i) => {
+                    const link = document.createElement('a');
+                    link.download = `board-page-${i + 1}.png`;
+                    link.href = dataURL;
+                    link.click();
+                  });
+                }}
+                className="text-xs hover:text-indigo-300 transition-colors"
+                title="Save all board pages"
+              >
+                💾
+              </button>
+            </div>
           </div>
         </div>
 
@@ -578,7 +688,7 @@ const Page = () => {
                 </div>
               ))}
               <p className="opacity-50 italic text-xs text-center pt-2">
-                {isSessionActive ? 'Mic is active. Speak naturally...' : 'Start the session to begin.'}
+                {isSessionActive ? (isMuted ? '🔇 Mic is muted' : 'Mic is active. Speak naturally...') : 'Start the session to begin.'}
               </p>
             </div>
           </div>
@@ -586,7 +696,19 @@ const Page = () => {
       </main>
 
       <footer className="p-6 bg-white border-t border-slate-200">
-        <div className="flex justify-center">
+        <div className="flex justify-center items-center gap-4">
+          <button
+            onClick={toggleMute}
+            disabled={!isSessionActive}
+            title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+            className={`
+              p-4 rounded-full font-bold text-lg transition-all shadow-lg
+              ${!isSessionActive ? 'opacity-30 cursor-not-allowed' : 'hover:scale-105'}
+              ${isMuted ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}
+            `}
+          >
+            {isMuted ? '🔇' : '🎙️'}
+          </button>
           <button
             onClick={handleSessionToggle}
             disabled={!isTutorReady && !isSessionActive}
