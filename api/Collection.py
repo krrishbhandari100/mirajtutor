@@ -57,7 +57,7 @@ def check_exists(email: str, password: str = ""):
         statement = select(User).where(User.email == email).where(User.password == password)
         results = session.exec(statement).all()
         res = []
-        print(results)
+        # print(results)
         if len(results) == 1:
             for user in results:
                 res.append(user)
@@ -122,6 +122,24 @@ def get_rooms(token: str = None, userId: str = None):
             })
 
         return records
+
+
+def delete_room(token: str, room_id: str):
+    with Session(engine) as session:
+        decoded_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        statement = select(User).where(User.email == decoded_payload['email'])
+        results = session.exec(statement).all()
+        if not results:
+            return {"status": "error", "msg": "User not found"}
+        userId = results[0].userId
+
+        room_statement = select(Room).where(Room.roomId == room_id, Room.userId == userId)
+        room = session.exec(room_statement).first()
+        if not room:
+            return {"status": "error", "msg": "Room not found or unauthorized"}
+        session.delete(room)
+        session.commit()
+        return {"status": "success", "msg": "Room deleted"}
 
 
 def get_rooms_by_id(id: str):

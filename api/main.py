@@ -4,6 +4,7 @@ from Collection import (
     add_user,
     check_exists,
     add_room,
+    delete_room,
     get_rooms,
     JWT_SECRET,
     JWT_ALGO,
@@ -22,6 +23,7 @@ import base64
 import numpy as np
 from faster_whisper import WhisperModel
 from tutor_resp import generate_tutor_response
+from document_parser import parse_document
 
 import json
 import re
@@ -142,6 +144,53 @@ def get_room_info(room_id: str):
     return get_rooms_by_id(room_id)
 
 
+class DeleteRoomSchema(BaseModel):
+    token: str
+    room_id: str
+
+
+@app.post("/delete_room")
+def delete_room_route(data: DeleteRoomSchema):
+    result = delete_room(token=data.token, room_id=data.room_id)
+    return result
+
+
+# ============================================================================
+# UPLOAD DOCUMENT ENDPOINT
+# ============================================================================
+
+from fastapi import File, UploadFile, Form, HTTPException
+
+
+@app.post("/upload_doc")
+async def upload_document(file: UploadFile = File(...), sid: str = Form(...)):
+    try:
+        file_bytes = await file.read()
+        parsed = parse_document(file_bytes, file.filename)
+        uploaded_documents[sid] = parsed
+        print(f"Document uploaded for {sid}: {file.filename} ({parsed['type']}, "
+              f"{len(parsed.get('text', ''))} chars, "
+              f"{len(parsed.get('pages', parsed.get('images', [])))} pages/images)")
+
+        total_pages = len(parsed.get("pages", []))
+        ack_text = f"Got it! I have received your document {file.filename}. It has {total_pages} pages. I can now answer questions from your study material. Go ahead and ask me anything."
+
+        payload = await build_ai_reply_payload(ack_text)
+        await sio.emit("ai_reply", payload, room=sid)
+
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "doc_type": parsed["type"],
+            "total_pages": total_pages,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse document")
+
+
 # ============================================================================
 # SOCKET.IO SERVER
 # ============================================================================
@@ -158,11 +207,12 @@ interruption_flags = {}
 chat_histories = {} 
 processing_flags = {}
 session_board_pages = {}  # { sid: { current: 1, total: 1 } } 
+uploaded_documents = {}  # { sid: { text, pages[], images[], type, filename } }
 
 
 async def build_ai_reply_payload(text: str):
     print(f"🔊 Building AI reply payload for text: {text[:50]}...")
-    voice = "hi-IN-MadhurNeural"
+    voice = "en-IN-NeerjaNeural"
     communicate = edge_tts.Communicate(text, voice, boundary="WordBoundary")
 
     audio_data = b""
@@ -220,6 +270,26 @@ async def disconnect(sid):
     chat_histories.pop(sid, None) 
     processing_flags.pop(sid, None)
     session_board_pages.pop(sid, None)
+    uploaded_documents.pop(sid, None)
+
+
+@sio.event
+async def request_board_image(sid, data):
+    page_num = data.get("page", 1) if isinstance(data, dict) else data
+    doc_info = uploaded_documents.get(sid)
+    if doc_info and doc_info.get("type") == "pdf":
+        pages = doc_info.get("pages", [])
+        for p in pages:
+            if p["number"] == page_num:
+                await sio.emit("board_image", {
+                    "page": page_num,
+                    "image_base64": p["image_base64"],
+                }, room=sid)
+                print(f"Sent board image page {page_num} to {sid}")
+                return
+        print(f"Page {page_num} not found in document for {sid}")
+    else:
+        print(f"No document or unsupported type for board_image request from {sid}")
 
 
 @sio.event
@@ -328,10 +398,19 @@ async def speech_ended(sid):
         board_pages = session_board_pages.get(sid, {"current": 1, "total": 1})
         board_ctx = f"Page {board_pages['current']} of {board_pages['total']}"
 
+        doc_info = uploaded_documents.get(sid, {})
+        doc_text = doc_info.get("text", "")
+        doc_images = [p["image_base64"] for p in doc_info.get("pages", [])[:4]
+                     ] if doc_info.get("type") == "pdf" else [
+            img["image_base64"] for img in doc_info.get("images", [])[:4]
+        ]
+
         ai_response_text = await asyncio.to_thread(
             generate_tutor_response,
             '', topic, system_prompt, current_history, user_text,
-            board_context=board_ctx
+            board_context=board_ctx,
+            document_text=doc_text,
+            document_images=doc_images
         )
 
         if not ai_response_text or interruption_flags.get(sid):

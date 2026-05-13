@@ -1,11 +1,10 @@
 "use client"
-import Head from 'next/head';
 import { useRouter } from 'next/navigation';
 import React, { useState } from 'react'
 import { ToastContainer, toast, Slide } from 'react-toastify';
 
 
-const page = () => {
+const Page = () => {
   const [first_name, setFirst_name] = useState("");
   const [last_name, setLast_name] = useState("");
   const [email, setEmail] = useState("");
@@ -128,4 +127,4 @@ const page = () => {
   )
 }
 
-export default page
+export default Page

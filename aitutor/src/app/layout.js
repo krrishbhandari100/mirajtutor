@@ -1,7 +1,6 @@
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Header from "@/Components/Header";
-import NoSSR from "@/Components/NOSSR";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -22,10 +21,8 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
-        <NoSSR>
-          <Header />
-          {children}
-        </NoSSR>
+        <Header />
+        {children}
       </body>
     </html>
   );

@@ -22,11 +22,9 @@ const Page = () => {
   // =====================================================================
 
   // DOM Elements
-  const videoRef = useRef(null);       // The <video> tag showing the student
   const tutorInstance = useRef(null);  // The 3D Avatar object
 
   // Hardware Streams
-  const cameraStreamRef = useRef(null); // Holds the raw camera data
   const micStreamRef = useRef(null);    // Holds the raw microphone data
 
   // Web Audio API Elements (The Audio Engine)
@@ -57,7 +55,6 @@ const Page = () => {
   // These variables DO trigger screen refreshes. Use them for UI text, buttons, etc.
   // =====================================================================
 
-  const [isCameraOn, setIsCameraOn] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isTutorReady, setIsTutorReady] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
@@ -68,6 +65,10 @@ const Page = () => {
 
   const [isMuted, setIsMuted] = useState(false);
   const isMutedRef = useRef(false);
+
+  const [docInfo, setDocInfo] = useState(null);
+  const docInfoRef = useRef(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   const [boardCurrentPage, setBoardCurrentPage] = useState(1);
   const [boardTotalPages, setBoardTotalPages] = useState(1);
@@ -83,6 +84,32 @@ const Page = () => {
     boardTotalPagesRef.current = tp;
     setBoardCurrentPage(cp);
     setBoardTotalPages(tp);
+  };
+
+  const handleUploadDoc = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('sid', socket.id || '');
+      const res = await fetch('http://localhost:8000/upload_doc', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setDocInfo(data);
+      } else {
+        addMessage('AI', `❌ Upload failed: ${data.detail || 'Unknown error'}`);
+      }
+    } catch (err) {
+      addMessage('AI', `❌ Upload error: ${err.message}`);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
+    }
   };
 
   const addMessage = (sender, text) => {
@@ -167,15 +194,6 @@ const Page = () => {
       micStreamRef.current = null;
     }
     cleanupSpeechDetection();
-  };
-
-  const cleanupCamera = () => {
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-      cameraStreamRef.current = null;
-    }
-    if (videoRef.current?.srcObject) videoRef.current.srcObject = null;
-    setIsCameraOn(false);
   };
 
   // =====================================================================
@@ -326,18 +344,6 @@ const Page = () => {
   // CHAPTER 6: START / STOP SESSION BUTTONS
   // =====================================================================
 
-  const startCameraPreview = async () => {
-    try {
-      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      cameraStreamRef.current = cameraStream;
-      if (videoRef.current) videoRef.current.srcObject = cameraStream;
-      setIsCameraOn(true);
-    } catch (error) {
-      console.error('Camera preview failed:', error);
-      setStatusText(`Camera failed: ${error.message}`);
-    }
-  };
-
   const startSession = async () => {
     if (sessionStartingRef.current || isSessionActiveRef.current) return;
     sessionStartingRef.current = true;
@@ -478,13 +484,7 @@ const Page = () => {
     fetchRoomInfo();
   }, [roomId]);
 
-  // 2. Start the Camera on load
-  useEffect(() => {
-    startCameraPreview();
-    return () => { cleanupCamera(); };
-  }, []);
-
-  // 3. Setup the WebSocket Listeners
+  // 2. Setup the WebSocket Listeners
   useEffect(() => {
     const handleConnect = () => {
       setStatusText((prev) => prev === 'Starting session...' ? 'Connected' : prev);
@@ -550,36 +550,55 @@ const Page = () => {
       const inst = tutorInstance.current;
       if (inst?.drawOnBoard && data?.boardresponse) {
         inst.drawOnBoard(data.boardresponse);
+        const br = data.boardresponse;
+        if (br.action === 'showimage' && br.page && docInfoRef.current?.total_pages) {
+          socket.emit('request_board_image', { page: br.page });
+        }
       }
       updateBoardPageState();
+    };
+
+    const handleBoardImage = (data) => {
+      if (sessionStoppedRef.current) return;
+      const inst = tutorInstance.current;
+      if (inst?.displayBoardImage && data) {
+        inst.displayBoardImage(data);
+      }
     };
 
     socket.off('connect');
     socket.off('disconnect');
     socket.off('ai_reply');
     socket.off('board_update');
+    socket.off('board_image');
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('ai_reply', handleAIReply);
     socket.on('board_update', handleBoardUpdate);
+    socket.on('board_image', handleBoardImage);
 
     return () => {
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
       socket.off('ai_reply', handleAIReply);
       socket.off('board_update', handleBoardUpdate);
+      socket.off('board_image', handleBoardImage);
     };
   }, []);
 
-  // 4. Final Cleanup when leaving the page entirely
+  // Sync docInfo to ref for use in socket closures
+  useEffect(() => {
+    docInfoRef.current = docInfo;
+  }, [docInfo]);
+
+  // 3. Final Cleanup when leaving the page entirely
   useEffect(() => {
     return () => {
       sessionStoppedRef.current = true;
       isSessionActiveRef.current = false;
       stopTutorSpeech();
       cleanupMic();
-      cleanupCamera();
       if (socket.connected) socket.disconnect();
     };
   }, []);
@@ -596,6 +615,20 @@ const Page = () => {
           <h1 className="font-bold text-lg text-slate-800">
             Room: {roomId || 'Unknown'}
           </h1>
+          <span className="w-px h-5 bg-slate-200" />
+          <label className={`cursor-pointer px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+            isUploading ? 'opacity-50 pointer-events-none bg-slate-100 text-slate-400' :
+            docInfo ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100' :
+            'bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100'
+          }`}>
+            {isUploading ? '⏳ Uploading...' : docInfo ? `📄 ${docInfo.filename}` : '📄 Upload Material'}
+            <input type="file" accept=".pdf,.pptx,.ppt,.docx,.doc" onChange={handleUploadDoc} className="hidden" disabled={isUploading} />
+          </label>
+          {docInfo && (
+            <button onClick={() => { setDocInfo(null); }} className="text-xs text-red-400 hover:text-red-600 transition-colors" title="Remove document">
+              ✕
+            </button>
+          )}
         </div>
         <div className="px-4 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold uppercase tracking-widest border border-indigo-100">
           {statusText}
@@ -611,7 +644,7 @@ const Page = () => {
           </div>
           <div className="w-full h-full bg-slate-100 relative">
             <TalkingTutor
-              avatarPath="/avatars/david.glb"
+              avatarPath="/avatars/julia.glb"
               onReady={(instance) => {
                 tutorInstance.current = instance;
                 console.log('TalkingTutor instance received:', instance);
@@ -667,18 +700,6 @@ const Page = () => {
         </div>
 
         <div className="w-80 flex flex-col gap-6">
-          <div className="aspect-video bg-white rounded-3xl border border-slate-200 relative overflow-hidden shadow-lg">
-            <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
-            {!isCameraOn && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-100">
-                <p className="text-xs text-slate-400">Camera Off</p>
-              </div>
-            )}
-            <div className="absolute bottom-3 left-3 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-lg text-[10px] font-bold text-slate-700 border border-slate-100">
-              YOU (Student)
-            </div>
-          </div>
-
           <div className="flex-1 bg-white rounded-[2rem] border border-slate-200 p-6 flex flex-col shadow-sm">
             <h3 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-4">Conversation</h3>
             <div className="flex-1 overflow-y-auto space-y-4 pr-2 text-sm text-slate-600">

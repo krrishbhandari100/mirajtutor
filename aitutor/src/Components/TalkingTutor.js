@@ -4,6 +4,15 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { LipsyncEn } from './lipsync-en.mjs';
+import {
+  initFont, isFontReady, analyzeText, drawAnimatedText, drawFullText
+} from './boardAnimation.js';
+
+if (typeof document !== 'undefined') {
+  const style = document.createElement('style');
+  style.textContent = `@font-face { font-family: 'Patrick Hand'; src: url('/fonts/PatrickHand-Regular.ttf') format('truetype'); }`;
+  document.head.appendChild(style);
+}
 
 const lipsync = new LipsyncEn();
 
@@ -15,6 +24,7 @@ const VISEME_TARGETS = [
 
 const BOARD_W = 800;
 const BOARD_H = 600;
+const CHAR_DRAW_DURATION = 0.055;
 
 export default function TalkingTutor({ avatarPath, onReady }) {
   const containerRef = useRef(null);
@@ -34,17 +44,22 @@ export default function TalkingTutor({ avatarPath, onReady }) {
   const audioStartTimeRef = useRef(0);
   const visemeTimelineRef = useRef([]);
 
-  const boardPagesRef = useRef([{ id: 1, commands: [] }]);
+  const boardPagesRef = useRef([{ id: 1, commands: [], image: null }]);
   const currentPageIndexRef = useRef(0);
   const pageIdCounterRef = useRef(2);
   const drawTimersRef = useRef([]);
+
+  const fontLoadedRef = useRef(false);
+  const boardAnimFrameRef = useRef(null);
+  const animStartTimeRef = useRef(0);
+  const animatingCmdsRef = useRef([]);
 
   const getCtx = useCallback(() => {
     const canvas = boardCanvasRef.current;
     return canvas ? canvas.getContext('2d') : null;
   }, []);
 
-  function drawCommand(ctx, cmd, cw, ch) {
+  function drawCommand(ctx, cmd, cw, ch, progress = 1) {
     const sx = cw / BOARD_W;
     const sy = ch / BOARD_H;
     const color = cmd.color || '#FFFFFF';
@@ -56,28 +71,45 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     switch (cmd.type) {
       case 'header':
       case 'text': {
-        ctx.font = `bold ${(cmd.size || 20) * sy}px "Segoe UI", Arial, sans-serif`;
-        ctx.textBaseline = 'top';
-        ctx.shadowColor = 'rgba(255,255,255,0.08)';
-        ctx.shadowBlur = 2 * sy;
-        ctx.fillText(cmd.content || '', cmd.x * sx, cmd.y * sy);
-        ctx.shadowBlur = 0;
+        const content = cmd.content || '';
+        const fontSize = cmd.size * sy || 32 * sy;
+        const px = cmd.x * sx;
+        const py = cmd.y * sy;
+
+        if (cmd._glyphData && fontLoadedRef.current) {
+          drawAnimatedText(ctx, cmd._glyphData, progress, {
+            x: px, y: py, color, lineWidth: Math.max(2, fontSize * 0.1),
+            showCursor: progress > 0 && progress < 1,
+          });
+        } else {
+          ctx.font = `bold ${fontSize}px "Patrick Hand", "Segoe UI", Arial, sans-serif`;
+          ctx.textBaseline = 'top';
+          ctx.shadowColor = 'rgba(255,255,255,0.08)';
+          ctx.shadowBlur = 2 * sy;
+          ctx.globalAlpha = progress;
+          ctx.fillText(content, px, py);
+          ctx.globalAlpha = 1;
+          ctx.shadowBlur = 0;
+        }
         break;
       }
       case 'line': {
-        ctx.lineWidth = 3 * sy;
+        ctx.lineWidth = 4 * sy;
+        ctx.globalAlpha = progress;
         ctx.beginPath();
         ctx.moveTo(cmd.x1 * sx, cmd.y1 * sy);
         ctx.lineTo(cmd.x2 * sx, cmd.y2 * sy);
         ctx.stroke();
+        ctx.globalAlpha = 1;
         break;
       }
       case 'arrow': {
-        ctx.lineWidth = 3 * sy;
+        ctx.lineWidth = 4 * sy;
         const ax = cmd.x1 * sx, ay = cmd.y1 * sy;
         const bx = cmd.x2 * sx, by = cmd.y2 * sy;
         const angle = Math.atan2(by - ay, bx - ax);
         const headLen = 12 * sy;
+        ctx.globalAlpha = progress;
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
@@ -88,38 +120,42 @@ export default function TalkingTutor({ avatarPath, onReady }) {
         ctx.lineTo(bx - headLen * Math.cos(angle + 0.4), by - headLen * Math.sin(angle + 0.4));
         ctx.closePath();
         ctx.fill();
+        ctx.globalAlpha = 1;
         break;
       }
       case 'rect': {
-        ctx.lineWidth = 3 * sy;
+        ctx.lineWidth = 4 * sy;
         const rx = cmd.x * sx, ry = cmd.y * sy;
         const rw = cmd.w * sx, rh = cmd.h * sy;
+        ctx.globalAlpha = progress;
         if (cmd.fill) {
           ctx.fillStyle = color;
-          ctx.globalAlpha = 0.15;
+          ctx.globalAlpha = 0.15 * progress;
           ctx.fillRect(rx, ry, rw, rh);
-          ctx.globalAlpha = 1;
         }
         ctx.strokeRect(rx, ry, rw, rh);
+        ctx.globalAlpha = 1;
         break;
       }
       case 'circle': {
-        ctx.lineWidth = 3 * sy;
+        ctx.lineWidth = 4 * sy;
+        ctx.globalAlpha = progress;
         ctx.beginPath();
         ctx.arc(cmd.cx * sx, cmd.cy * sy, cmd.r * sx, 0, Math.PI * 2);
         if (cmd.fill) {
           ctx.fillStyle = color;
-          ctx.globalAlpha = 0.15;
+          ctx.globalAlpha = 0.15 * progress;
           ctx.fill();
-          ctx.globalAlpha = 1;
         }
         ctx.stroke();
+        ctx.globalAlpha = 1;
         break;
       }
       case 'curve': {
-        ctx.lineWidth = 3 * sy;
+        ctx.lineWidth = 4 * sy;
         const pts = cmd.points || [];
         if (pts.length >= 4) {
+          ctx.globalAlpha = progress;
           ctx.beginPath();
           ctx.moveTo(pts[0][0] * sx, pts[0][1] * sy);
           ctx.bezierCurveTo(
@@ -128,6 +164,24 @@ export default function TalkingTutor({ avatarPath, onReady }) {
             pts[1][0] * sx, pts[1][1] * sy
           );
           ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        break;
+      }
+      case 'showimage': {
+        const page = boardPagesRef.current[currentPageIndexRef.current];
+        if (page?.image) {
+          const img = new Image();
+          img.onload = () => {
+            const dx = (cmd.x || 0) * sx;
+            const dy = (cmd.y || 0) * sy;
+            const dw = (cmd.w || BOARD_W) * sx;
+            const dh = (cmd.h || BOARD_H) * sy;
+            ctx.globalAlpha = (cmd.opacity ?? 0.7) * progress;
+            ctx.drawImage(img, dx, dy, dw, dh);
+            ctx.globalAlpha = 1;
+          };
+          img.src = page.image;
         }
         break;
       }
@@ -146,32 +200,85 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    for (const cmd of pages[pageIndex].commands) {
-      drawCommand(ctx, cmd, canvas.width, canvas.height);
+    const page = pages[pageIndex];
+    if (page.image) {
+      const img = new Image();
+      img.src = page.image;
+      ctx.globalAlpha = 1;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    }
+
+    for (const cmd of page.commands) {
+      const prog = cmd._progress !== undefined ? cmd._progress : 1;
+      drawCommand(ctx, cmd, canvas.width, canvas.height, prog);
     }
   }, [getCtx]);
+
+  function startBoardAnimationLoop() {
+    if (boardAnimFrameRef.current) cancelAnimationFrame(boardAnimFrameRef.current);
+
+    if (animatingCmdsRef.current.length === 0) return;
+
+    const animate = () => {
+      const elapsed = isPlayingRef.current && audioContextRef.current
+        ? audioContextRef.current.currentTime - audioStartTimeRef.current
+        : (performance.now() - animStartTimeRef.current) / 1000;
+
+      let allDone = true;
+
+      for (const cmd of animatingCmdsRef.current) {
+        const cmdTime = cmd.time || 0;
+        const dur = cmd._duration || Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
+        const localElapsed = elapsed - cmdTime;
+
+        if (localElapsed <= 0) {
+          cmd._progress = 0;
+          allDone = false;
+        } else if (localElapsed >= dur) {
+          cmd._progress = 1;
+        } else {
+          cmd._progress = localElapsed / dur;
+          allDone = false;
+        }
+      }
+
+      renderPage(currentPageIndexRef.current);
+
+      if (!allDone) {
+        boardAnimFrameRef.current = requestAnimationFrame(animate);
+      } else {
+        boardAnimFrameRef.current = null;
+        animatingCmdsRef.current = [];
+        for (const cmd of (boardPagesRef.current[currentPageIndexRef.current]?.commands || [])) {
+          delete cmd._progress;
+        }
+      }
+    };
+
+    boardAnimFrameRef.current = requestAnimationFrame(animate);
+  }
 
   const scheduleTimedDraws = useCallback((commands) => {
     drawTimersRef.current.forEach(t => clearTimeout(t));
     drawTimersRef.current = [];
 
-    const pageIdx = currentPageIndexRef.current;
-    const ctx = audioContextRef.current;
-    const startTime = audioStartTimeRef.current;
-
+    const animCmds = [];
     for (const cmd of commands) {
-      const t = cmd.time || 0;
-      if (t > 0 && ctx) {
-        const delay = ((startTime + t) - ctx.currentTime) * 1000;
-        if (delay > 0) {
-          const timer = setTimeout(() => {
-            renderPage(pageIdx);
-          }, delay);
-          drawTimersRef.current.push(timer);
-        }
+      if ((cmd.type === 'text' || cmd.type === 'header') && cmd._glyphData) {
+        cmd._progress = 0;
+        cmd._duration = cmd._duration || Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
+        animCmds.push(cmd);
       }
     }
-  }, [renderPage]);
+
+    if (animCmds.length > 0) {
+      animatingCmdsRef.current = animCmds;
+      animStartTimeRef.current = isPlayingRef.current && audioContextRef.current
+        ? audioContextRef.current.currentTime
+        : performance.now();
+      startBoardAnimationLoop();
+    }
+  }, []);
 
   const drawOnBoard = useCallback((boardresponse) => {
     if (!boardresponse || typeof boardresponse !== 'object') return;
@@ -196,6 +303,7 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     }
 
     const page = boardPagesRef.current[currentPageIndexRef.current];
+    const animatedCmds = [];
 
     for (const cmd of commands) {
       if (cmd.type === 'erase') {
@@ -209,13 +317,42 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       } else if (cmd.type === 'clear') {
         page.commands = [];
       } else {
+        if (cmd.type === 'text' || cmd.type === 'header') {
+          const fontSize = cmd.size || 32;
+          const glyphData = isFontReady() ? analyzeText(cmd.content || '', fontSize) : null;
+          if (glyphData) {
+            cmd._glyphData = glyphData;
+            cmd._progress = 0;
+            cmd._duration = Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
+            animatedCmds.push(cmd);
+          }
+        }
         page.commands.push(cmd);
       }
     }
 
     renderPage(currentPageIndexRef.current);
-    scheduleTimedDraws(commands);
+
+    if (animatedCmds.length > 0) {
+      animatingCmdsRef.current = animatedCmds;
+      animStartTimeRef.current = isPlayingRef.current && audioContextRef.current
+        ? audioContextRef.current.currentTime
+        : performance.now();
+      startBoardAnimationLoop();
+    } else {
+      scheduleTimedDraws(commands);
+    }
   }, [renderPage, scheduleTimedDraws]);
+
+  const displayBoardImage = useCallback(({ page, image_base64 }) => {
+    const idx = currentPageIndexRef.current;
+    boardPagesRef.current[idx] = {
+      ...boardPagesRef.current[idx],
+      commands: boardPagesRef.current[idx]?.commands || [],
+      image: image_base64,
+    };
+    renderPage(idx);
+  }, [renderPage]);
 
   const clearBoard = useCallback(() => {
     boardPagesRef.current[currentPageIndexRef.current].commands = [];
@@ -241,7 +378,16 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       octx.fillRect(0, 0, BOARD_W, BOARD_H);
 
       for (const cmd of pages[idx].commands) {
-        drawCommand(octx, cmd, BOARD_W, BOARD_H);
+        if (cmd._glyphData) {
+          const color = cmd.color || '#FFFFFF';
+          const fontSize = cmd.size || 32;
+          drawFullText(octx, cmd._glyphData, {
+            x: cmd.x, y: cmd.y, color,
+            lineWidth: Math.max(2, fontSize * 0.1),
+          });
+        } else {
+          drawCommand(octx, cmd, BOARD_W, BOARD_H);
+        }
       }
 
       return offscreen.toDataURL('image/png');
@@ -250,6 +396,11 @@ export default function TalkingTutor({ avatarPath, onReady }) {
 
   const navigateToPage = useCallback((n) => {
     if (n < 1 || n > boardPagesRef.current.length) return;
+    if (boardAnimFrameRef.current) {
+      cancelAnimationFrame(boardAnimFrameRef.current);
+      boardAnimFrameRef.current = null;
+    }
+    animatingCmdsRef.current = [];
     currentPageIndexRef.current = n - 1;
     renderPage(n - 1);
   }, [renderPage]);
@@ -505,6 +656,9 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     return loadAvatarModel(avatarPath).then(() => {
       initAudioSystem();
       startAnimationLoop();
+      return initFont();
+    }).then(() => {
+      fontLoadedRef.current = isFontReady();
     });
   }
 
@@ -534,8 +688,10 @@ export default function TalkingTutor({ avatarPath, onReady }) {
         onReady({
           speakAudio,
           stop: stopSpeaking,
+          stopSpeaking,
           cancelSpeech: cancelSpeaking,
           drawOnBoard,
+          displayBoardImage,
           clearBoard,
           saveBoardAsImage,
           saveAllPages,
@@ -557,6 +713,7 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       cancelled = true;
       drawTimersRef.current.forEach(t => clearTimeout(t));
       cancelAnimationFrame(animationFrameRef.current);
+      if (boardAnimFrameRef.current) cancelAnimationFrame(boardAnimFrameRef.current);
       if (audioSourceRef.current) {
         try { audioSourceRef.current.stop(); } catch (e) { }
       }

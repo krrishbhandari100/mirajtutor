@@ -1,8 +1,8 @@
 "use client"
 import { jwtDecode } from 'jwt-decode';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation'; // Cleaned up imports
-import React, { useState, useEffect } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import React, { useState, useEffect, useCallback } from 'react';
 
 const Header = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -10,40 +10,31 @@ const Header = () => {
   const pathname = usePathname();
   const router = useRouter();
 
-  // Define handleLogout so it can be used in useEffect and the button
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     localStorage.removeItem("token");
     setUser(null);
-    router.push('/'); // Redirect to home after logout
-  };
+    router.push('/');
+  }, [router]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
-
-    if (token) {
-      try {
-        const decoded = jwtDecode(token);
-        const currentTime = Math.floor(Date.now() / 1000);
-        
-        if (decoded.expires < currentTime) {
-          handleLogout();
-          return;
-        }
-
-        const displayName = decoded.email.split('@')[0];
-        setUser({ 
-          name: displayName, 
-          email: decoded.email 
-        });
-
-      } catch (error) {
-        setUser(null);
-      }
-    } else {
-      setUser(null); // Clear user if no token exists (e.g., after manual deletion)
-      
+    if (!token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setUser(null);
+      return;
     }
-  }, [pathname]);
+    try {
+      const decoded = jwtDecode(token);
+      if (decoded.expires < Math.floor(Date.now() / 1000)) {
+        localStorage.removeItem("token");
+        router.push('/');
+        return;
+      }
+      setUser({ name: decoded.email.split('@')[0], email: decoded.email });
+    } catch {
+      setUser(null);
+    }
+  }, [pathname, router]);
 
   return (
     <nav className="top-0 z-50 w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">

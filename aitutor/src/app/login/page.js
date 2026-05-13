@@ -3,7 +3,7 @@ import { useRouter } from 'next/navigation';
 import React, { useState } from 'react'
 import { Slide, ToastContainer, toast } from 'react-toastify';
 
-const page = () => {
+const Page = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const router = useRouter();
@@ -109,4 +109,4 @@ const page = () => {
   )
 }
 
-export default page
+export default Page
