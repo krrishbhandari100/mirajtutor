@@ -134,7 +134,7 @@ const Page = () => {
       tutorCooldownRef.current = setTimeout(() => {
         isTutorSpeakingRef.current = false;
         tutorCooldownRef.current = null;
-      }, 600);
+      }, 1200);
     }
   };
 

@@ -5,3 +5,4 @@ aitutor/.next
 api/__pycache__
 api/*.db
 AGENTS.md
+refactored_ai_tutor_pipeline_python.md
