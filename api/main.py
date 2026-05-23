@@ -8,7 +8,6 @@ from Collection import (
     get_rooms,
     JWT_SECRET,
     JWT_ALGO,
-    SALT,
     get_rooms_by_id,
 )
 
@@ -413,6 +412,17 @@ async def speech_ended(sid):
             document_images=doc_images
         )
 
+        try:
+            import re as _re
+            _match = _re.search(r'\{.*\}', ai_response_text, _re.DOTALL)
+            if _match:
+                _parsed, _ = json.JSONDecoder().raw_decode(_match.group(0).strip())
+                print(f"\n{'='*60}\n📦 MODEL JSON RESPONSE:\n{json.dumps(_parsed, indent=2, ensure_ascii=False)}\n{'='*60}")
+            else:
+                print(f"\n{'='*60}\n📦 MODEL RAW (no JSON found):\n{ai_response_text}\n{'='*60}")
+        except Exception as _dbg_e:
+            print(f"\n{'='*60}\n📦 MODEL RAW (parse failed: {_dbg_e}):\n{ai_response_text}\n{'='*60}")
+
         if not ai_response_text or interruption_flags.get(sid):
             return
 
@@ -421,11 +431,52 @@ async def speech_ended(sid):
         clean_json_str = None
         board_update = {'writingresponse': '', 'visualresponse': None, 'boardresponse': None}
 
+        def strip_markdown_fences(text):
+            text = text.strip()
+            if text.startswith('```'):
+                text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+                text = re.sub(r'\n?```\s*$', '', text)
+            return text.strip()
+
+        def sanitize_json_newlines(text):
+            """Replace literal newlines inside JSON string values with \\n."""
+            result = []
+            in_string = False
+            escape = False
+            for ch in text:
+                if escape:
+                    result.append(ch)
+                    escape = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape = True
+                    result.append(ch)
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    result.append(ch)
+                    continue
+                if in_string and ch in '\n\r':
+                    result.append('\\n')
+                    continue
+                result.append(ch)
+            return ''.join(result)
+
+        def extract_speaking_fallback(raw):
+            m = re.search(r'content\s*:\s*["\']?(.*?)(?:["\']?\s*,\s*(?:\w+|"\w+")\s*:|\s*,\s*boardresponse|\s*,\s*writingresponse|\s*,\s*visualresponse)', raw, re.DOTALL)
+            if m:
+                return m.group(1).strip()
+            m = re.search(r'(?:speakingresponse|"speakingresponse")\s*:\s*["\']?(.*?)["\']?\s*(?:,\s*(?:\w+|"\w+")\s*:|\Z)', raw, re.DOTALL)
+            if m:
+                return m.group(1).strip()
+            return None
+
         try:
-            match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
+            clean_for_parse = strip_markdown_fences(ai_response_text)
+            match = re.search(r'\{.*\}', clean_for_parse, re.DOTALL)
             if match:
-                clean_json_str = match.group(0)
-                ai_response = json.loads(clean_json_str)
+                clean_json_str = sanitize_json_newlines(match.group(0).strip())
+                ai_response, _ = json.JSONDecoder().raw_decode(clean_json_str)
                 speaking_text = ai_response.get('speakingresponse', "I am ready to help.")
                 board_update['writingresponse'] = ai_response.get('writingresponse', '')
                 board_update['visualresponse'] = ai_response.get('visualresponse', None)
@@ -441,14 +492,20 @@ async def speech_ended(sid):
                     if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
                         session_board_pages[sid]['current'] = target
             else:
-                print("⚠️ No JSON block found in AI response!")
-                speaking_text = speaking_text.replace("{", "").replace("}", "").replace('"', '').replace("\\n", " ")
+                print("⚠️ No JSON block found — trying fallback extraction")
+                fallback = extract_speaking_fallback(ai_response_text)
+                speaking_text = fallback if fallback else "I heard you, but I could not generate a proper response."
         except Exception as e:
             print(f"❌ Failed to parse Ollama JSON: {e}")
-            speaking_text = speaking_text.replace("{", "").replace("}", "").replace('"', '').replace("\\n", " ")
+            fallback = extract_speaking_fallback(ai_response_text)
+            speaking_text = fallback if fallback else "I heard you, but I could not generate a proper response."
 
         if not speaking_text.strip():
             speaking_text = "I heard you, but I could not generate a response."
+
+        # Strip markdown symbols before TTS (prevents "asterisk" pronunciation)
+        speaking_text = re.sub(r'[\*_#]+', '', speaking_text)
+        speaking_text = speaking_text.strip()
 
         # 💥 SAVE TO HISTORY FOR THE NEXT TURN
         if clean_json_str:
@@ -461,10 +518,12 @@ async def speech_ended(sid):
             if len(chat_histories[sid]) > 10:
                 chat_histories[sid] = chat_histories[sid][-10:]
 
+        print(f"🎯 EXTRACTED SPEAKING_TEXT:\n{speaking_text[:300]}\n{'='*60}")
+
         print("🔊 Generating speech...")
+        await sio.emit("board_update", board_update, room=sid)
         payload = await build_ai_reply_payload(speaking_text)
         await sio.emit("ai_reply", payload, room=sid)
-        await sio.emit("board_update", board_update, room=sid)
 
     except Exception as e:
         print(f"❌ speech_ended error for {sid}: {e}")

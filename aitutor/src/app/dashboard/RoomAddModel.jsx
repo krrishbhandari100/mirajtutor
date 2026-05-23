@@ -1,7 +1,7 @@
 "use client"; // Required for client-side interactivity
 import { useEffect, useState } from "react";
 
-export default function CreateRoomModal({ isOpen, onClose, onCreate, token }) {
+export default function CreateRoomModal({ isOpen, onClose, onCreate }) {
   // 1. State for all three fields
   const [roomName, setRoomName] = useState("");
   const [topic, setTopic] = useState("");

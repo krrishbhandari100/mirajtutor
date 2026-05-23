@@ -1,12 +1,11 @@
 "use client"
-import { useRouter } from 'next/navigation';
 import React, { useEffect, useState } from 'react'
 import CreateRoomModal from './RoomAddModel';
 import Link from 'next/link';
 
 
 const Page = () => {
-    const [isModalOpen, setIsModalOpen] = useState(false)
+    const [isModalOpen, setIsModalOpen] = useState(false);
     const [rooms, setRooms] = useState([]);
     const [deleteConfirm, setDeleteConfirm] = useState(null)
 

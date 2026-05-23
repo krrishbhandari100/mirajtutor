@@ -44,7 +44,7 @@ const Page = () => {
   const noiseFloorRef = useRef(0);
   const calibrationFramesRef = useRef(0);
   const CALIBRATION_FRAMES = 45; // Wait ~1.5 seconds to measure room silence
-  const NOISE_MULTIPLIER = 1.4;  // You must speak 40% louder than the room to trigger the mic
+  const NOISE_MULTIPLIER = 1.2;  // You must speak 20% louder than the room to trigger the mic
 
   // AI Guard Rails
   const isTutorSpeakingRef = useRef(false); // Mutes the mic when the AI talks (prevents echoes)
@@ -277,7 +277,7 @@ const Page = () => {
         if (isSpeakingRef.current) {
           isSpeakingRef.current = false;
           setStatusText('Muted');
-          socket.emit('speech_ended');
+          socket.emit('speech_ended');  
         }
         if (silenceTimeoutRef.current) {
           clearTimeout(silenceTimeoutRef.current);
@@ -548,13 +548,26 @@ const Page = () => {
     const handleBoardUpdate = (data) => {
       if (sessionStoppedRef.current) return;
       const inst = tutorInstance.current;
-      if (inst?.drawOnBoard && data?.boardresponse) {
-        inst.drawOnBoard(data.boardresponse);
-        const br = data.boardresponse;
-        if (br.action === 'showimage' && br.page && docInfoRef.current?.total_pages) {
-          socket.emit('request_board_image', { page: br.page });
+      if (!inst?.drawOnBoard || !data?.boardresponse) return;
+
+      // Safety: y-slot only — prevents two texts at same y line
+      const usedYSlots = new Set();
+      if (data.boardresponse.commands) {
+        for (const cmd of data.boardresponse.commands) {
+          if (cmd.type === 'text' || cmd.type === 'header') {
+            while (usedYSlots.has(cmd.y) && cmd.y < 540) cmd.y += 50;
+            usedYSlots.add(cmd.y);
+          }
         }
       }
+
+      inst.drawOnBoard(data.boardresponse);
+
+      const br = data.boardresponse;
+      if (br?.action === 'showimage' && br.page && docInfoRef.current?.total_pages) {
+        socket.emit('request_board_image', { page: br.page });
+      }
+
       updateBoardPageState();
     };
 
