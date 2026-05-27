@@ -336,6 +336,7 @@ async def audio_chunk(sid, data):
 async def user_interrupted(sid):
     print(f"🛑 Student {sid} interrupted the AI!")
     interruption_flags[sid] = True
+    processing_flags[sid] = False  # Allow new speech to flow immediately
 
 
 @sio.event

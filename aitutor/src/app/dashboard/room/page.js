@@ -214,7 +214,7 @@ const Page = () => {
     // 3. Setup the Processor (Chops the audio into tiny chunks to send to Python)
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
     source.connect(processor);
-    processor.connect(audioContext.destination);
+    processor.connect(audioContext.destination); // something like connection speakers
 
     // 🌟 THE "FIRST SYLLABLE" FIX: Keeps the last split-second of audio in memory
     let lastAudioChunk = null;
@@ -277,7 +277,7 @@ const Page = () => {
         if (isSpeakingRef.current) {
           isSpeakingRef.current = false;
           setStatusText('Muted');
-          socket.emit('speech_ended');  
+          socket.emit('speech_ended');
         }
         if (silenceTimeoutRef.current) {
           clearTimeout(silenceTimeoutRef.current);
@@ -287,9 +287,35 @@ const Page = () => {
         return;
       }
 
-      // Phase C: AI Guard 
-      // If AI is talking, don't listen to anything.
+      // Phase C: AI Guard (Interruptible)
+      // Student must speak 2.5x louder than normal to interrupt the tutor.
+      // Once interrupted, threshold drops back to normal.
       if (isTutorSpeakingRef.current) {
+        const INTERRUPT_MULTIPLIER = 1.25;
+        const interruptThreshold = Math.max(noiseFloorRef.current * INTERRUPT_MULTIPLIER, 15);
+        console.log("My Vol", volume);
+        console.log("interruptThreshold", interruptThreshold);
+        if (volume > interruptThreshold) {
+          // Student interrupted! Stop tutor immediately
+          stopTutorSpeech();
+          if (tutorCooldownRef.current) {
+            clearTimeout(tutorCooldownRef.current);
+            tutorCooldownRef.current = null;
+          }
+          isTutorSpeakingRef.current = false;
+
+          socket.emit('user_interrupted');
+
+          // Begin capturing student speech immediately
+          isSpeakingRef.current = true;
+          setStatusText('Listening...');
+          socket.emit('speech_started');
+          if (lastAudioChunk) {
+            socket.emit('audio_chunk', lastAudioChunk.buffer);
+            lastAudioChunk = null;
+          }
+        }
+
         if (silenceTimeoutRef.current) {
           clearTimeout(silenceTimeoutRef.current);
           silenceTimeoutRef.current = null;
