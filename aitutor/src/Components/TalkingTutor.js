@@ -454,7 +454,6 @@ export default function TalkingTutor({ avatarPath, onReady }) {
         const idx = dict[name];
         if (idx !== undefined) influences[idx] = 0;
       });
-      if (dict['jawOpen'] !== undefined) influences[dict['jawOpen']] = 0;
       if (dict['mouthOpen'] !== undefined) influences[dict['mouthOpen']] = 0;
 
       Object.entries(visemes).forEach(([key, weight]) => {
@@ -532,10 +531,34 @@ export default function TalkingTutor({ avatarPath, onReady }) {
           modelRef.current.position.set(0, 0, 0);
           modelRef.current.position.x -= center.x;
           modelRef.current.position.z -= center.z;
-          modelRef.current.position.y = -center.y + 0.1;
+          modelRef.current.position.y = -center.y - 0.7;
 
           const maxDim = Math.max(size.x, size.y, size.z);
-          modelRef.current.scale.setScalar(2.2 / maxDim);
+          modelRef.current.scale.setScalar(3.2 / maxDim);
+
+          // Remap morphTargetDictionary using semantic names from extras.targetNames
+          modelRef.current.traverse((child) => {
+            if (!child.isMesh || !child.geometry?.morphAttributes?.position) return;
+            const targetNames = child.userData?.targetNames;
+            if (!targetNames) return;
+            const dict = {};
+            targetNames.forEach((name, i) => {
+              dict[name] = i;
+            });
+            child.morphTargetDictionary = dict;
+          });
+
+          // Tint skin meshes to light/fair complexion
+          modelRef.current.traverse((child) => {
+            if (!child.isMesh) return;
+            if (child.name === 'Wolf3D_Head' || child.name === 'Wolf3D_Body') {
+              if (child.material) {
+                const mat = child.material;
+                mat.color.setHex(0xF5D0C5);
+                if (Array.isArray(mat)) mat.forEach(m => m.color.setHex(0xF5D0C5));
+              }
+            }
+          });
 
           resolve();
         },
@@ -549,8 +572,8 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     visemeTimelineRef.current = [];
 
     words.forEach((word, i) => {
-      const wordStart = wtimes[i] || 0;
-      const wordDur = wdurations[i] || 0.25;
+      const wordStart = (wtimes[i] || 0);
+      const wordDur = (wdurations[i] || 0.25);
       const result = lipsync.wordsToVisemes(word);
 
       if (result.visemes.length > 0) {
@@ -565,11 +588,11 @@ export default function TalkingTutor({ avatarPath, onReady }) {
 
           visemeTimelineRef.current.push({
             time: t,
-            visemes: { [visemeKey]: 1.0, jawOpen: 0.6 }
+            visemes: { [visemeKey]: 1.0, mouthOpen: 0.6 }
           });
           visemeTimelineRef.current.push({
             time: t + d * 0.7,
-            visemes: { [visemeKey]: 0.4, jawOpen: 0.2 }
+            visemes: { [visemeKey]: 0.4, mouthOpen: 0.2 }
           });
         });
       }
@@ -593,7 +616,7 @@ export default function TalkingTutor({ avatarPath, onReady }) {
 
       visemeTimelineRef.current.push({
         time,
-        visemes: { jawOpen: jawOpen }
+        visemes: { mouthOpen: jawOpen }
       });
     }
   }

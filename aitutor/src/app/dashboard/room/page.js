@@ -683,7 +683,7 @@ const Page = () => {
           </div>
           <div className="w-full h-full bg-slate-100 relative">
             <TalkingTutor
-              avatarPath="/avatars/julia.glb"
+              avatarPath="/avatars/female-avatar4.glb"
               onReady={(instance) => {
                 tutorInstance.current = instance;
                 console.log('TalkingTutor instance received:', instance);

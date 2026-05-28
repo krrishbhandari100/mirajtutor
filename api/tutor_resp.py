@@ -12,7 +12,7 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
 
     {system_prompt}
 
-    Your students are LISTENING to you, not reading. Your explanation will be converted into speech. Use Hinglish when it feels natural — mix Hindi and English to make concepts clearer. For example: "Yeh concept samajhna bohot easy hai, let me explain."
+    Your students are LISTENING to you, not reading. Your explanation will be converted into speech.
 
     Your goal is not just to explain, but to teach like a real classroom teacher who decides:
     - what must be understood deeply

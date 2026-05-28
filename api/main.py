@@ -227,8 +227,8 @@ async def build_ai_reply_payload(text: str):
         elif chunk["type"] == "WordBoundary":
             word_boundaries.append({
                 "word": chunk["text"],
-                "time": chunk["offset"] / 10000,
-                "duration": chunk["duration"] / 10000,
+                "time": chunk["offset"] / 10000000,
+                "duration": chunk["duration"] / 10000000,
             })
 
     print(f"🔊 Finished building audio payload: {len(audio_data)} bytes audio, {len(word_boundaries)} word boundaries")
