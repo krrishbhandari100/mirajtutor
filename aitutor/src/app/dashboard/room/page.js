@@ -1,12 +1,15 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { socket } from './socket';
 
-// Dynamically import the 3D Avatar so it doesn't break Next.js Server-Side Rendering
+// Dynamically import the 3D Avatar and Board so they don't break Next.js Server-Side Rendering
 const TalkingTutor = dynamic(() => import('@/Components/TalkingTutor'), {
+  ssr: false,
+});
+const BoardCanvas = dynamic(() => import('@/Components/BoardCanvas'), {
   ssr: false,
 });
 
@@ -22,7 +25,8 @@ const Page = () => {
   // =====================================================================
 
   // DOM Elements
-  const tutorInstance = useRef(null);  // The 3D Avatar object
+  const avatarRef = useRef(null);      // The 3D Avatar object
+  const boardRef = useRef(null);       // The Board Canvas object
 
   // Hardware Streams
   const micStreamRef = useRef(null);    // Holds the raw microphone data
@@ -39,6 +43,7 @@ const Page = () => {
   const isSessionActiveRef = useRef(false); // Has the "Start" button been clicked?
   const sessionStartingRef = useRef(false); // Prevents clicking "Start" twice quickly
   const sessionStoppedRef = useRef(false);  // Forces everything to shut down
+  const interruptedRef = useRef(false);     // True when student interrupts, checked before playing audio
 
   // VAD (Voice Activity Detection) - Math variables to measure room noise
   const noiseFloorRef = useRef(0);
@@ -59,12 +64,9 @@ const Page = () => {
   const [isTutorReady, setIsTutorReady] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
   const [roomInfo, setRoomInfo] = useState({ subject: '', topic: '', prevCtx: '' });
-  const [messages, setMessages] = useState([
-    { sender: 'AI', text: 'Hello! Start the session whenever you are ready.' },
-  ]);
 
-  const [isMuted, setIsMuted] = useState(false);
-  const isMutedRef = useRef(false);
+  const [isMuted, setIsMuted] = useState(true);
+  const isMutedRef = useRef(true);
 
   const [docInfo, setDocInfo] = useState(null);
   const docInfoRef = useRef(null);
@@ -75,16 +77,26 @@ const Page = () => {
   const boardCurrentPageRef = useRef(1);
   const boardTotalPagesRef = useRef(1);
 
+  // Sequential chunk queue for AI replies
+  const itemQueueRef = useRef([]);
+  const isProcessingRef = useRef(false);
+  const interruptedQueueBackupRef = useRef([]);
+
   const updateBoardPageState = () => {
-    const inst = tutorInstance.current;
-    if (!inst) return;
-    const cp = inst.getCurrentPage?.() || 1;
-    const tp = inst.getTotalPages?.() || 1;
+    const board = boardRef.current;
+    if (!board) return;
+    const cp = board.getCurrentPage?.() || 1;
+    const tp = board.getTotalPages?.() || 1;
     boardCurrentPageRef.current = cp;
     boardTotalPagesRef.current = tp;
     setBoardCurrentPage(cp);
     setBoardTotalPages(tp);
   };
+
+  const handleAvatarReady = useCallback((avatarInstance) => {
+    avatarRef.current = avatarInstance;
+    setIsTutorReady(true);
+  }, []);
 
   const handleUploadDoc = async (e) => {
     const file = e.target.files?.[0];
@@ -101,19 +113,13 @@ const Page = () => {
       const data = await res.json();
       if (data.status === 'success') {
         setDocInfo(data);
-      } else {
-        addMessage('AI', `❌ Upload failed: ${data.detail || 'Unknown error'}`);
       }
     } catch (err) {
-      addMessage('AI', `❌ Upload error: ${err.message}`);
+      console.error('Upload error:', err);
     } finally {
       setIsUploading(false);
       e.target.value = '';
     }
-  };
-
-  const addMessage = (sender, text) => {
-    setMessages((prev) => [...prev, { sender, text }]);
   };
 
   // =====================================================================
@@ -139,24 +145,163 @@ const Page = () => {
   };
 
   const stopTutorSpeech = async () => {
-    const tutor = tutorInstance.current;
-    if (!tutor) return;
+    const avatar = avatarRef.current;
+    if (!avatar) return;
     try {
       // Brutally force the 3D model to stop animating and playing sound
-      if (typeof tutor.stop === 'function') await tutor.stop();
-      if (typeof tutor.stopSpeaking === 'function') await tutor.stopSpeaking();
-      if (typeof tutor.cancelSpeech === 'function') await tutor.cancelSpeech();
-      if (tutor.audio) {
-        try { tutor.audio.pause(); tutor.audio.currentTime = 0; } catch { }
+      if (typeof avatar.stop === 'function') await avatar.stop();
+      if (typeof avatar.stopSpeaking === 'function') await avatar.stopSpeaking();
+      if (typeof avatar.cancelSpeech === 'function') await avatar.cancelSpeech();
+      if (avatar.audio) {
+        try { avatar.audio.pause(); avatar.audio.currentTime = 0; } catch { }
       }
-      if (tutor.audioCtx && tutor.audioCtx.state === 'running') {
-        await tutor.audioCtx.suspend();
+      if (avatar.audioCtx && avatar.audioCtx.state === 'running') {
+        await avatar.audioCtx.suspend();
       }
     } catch (error) {
       console.error('Error stopping tutor speech:', error);
     } finally {
       setTutorSpeaking(false);
     }
+  };
+
+  // =====================================================================
+  // CHAPTER 3.5: SEQUENTIAL CHUNK QUEUE
+  // Processes multiple ai_reply events one at a time: draw board → play audio → next
+  // =====================================================================
+
+  const processNextItem = async () => {
+    if (isProcessingRef.current) return;
+    if (itemQueueRef.current.length === 0) return;
+
+    if (sessionStoppedRef.current) {
+      itemQueueRef.current = [];
+      return;
+    }
+
+    isProcessingRef.current = true;
+    const data = itemQueueRef.current.shift();
+
+    try {
+      // Draw board (if present) BEFORE audio starts
+      if (data.boardresponse) {
+        const board = boardRef.current;
+        if (board) {
+          const usedYSlots = new Set();
+          if (data.boardresponse.commands) {
+            for (const cmd of data.boardresponse.commands) {
+              if (cmd.type === 'text' || cmd.type === 'header') {
+                while (usedYSlots.has(cmd.y) && cmd.y < 540) cmd.y += 50;
+                usedYSlots.add(cmd.y);
+              }
+            }
+          }
+          board.drawOnBoard(data.boardresponse, data.targetPage);
+          if (data.boardresponse.action === 'showimage' && data.boardresponse.page && docInfoRef.current?.total_pages) {
+            socket.emit('request_board_image', { page: data.boardresponse.page });
+          }
+          updateBoardPageState();
+        }
+      }
+
+      // Check if interrupted while board was drawing
+      if (interruptedRef.current || sessionStoppedRef.current) {
+        interruptedRef.current = false;
+        setStatusText('Session active');
+        isProcessingRef.current = false;
+        processNextItem();
+        return;
+      }
+
+      if (!data.audio || !avatarRef.current) {
+        setStatusText('Session active');
+        isProcessingRef.current = false;
+        setTutorSpeaking(false);
+        processNextItem();
+        return;
+      }
+
+      setStatusText('Tutor speaking...');
+      setTutorSpeaking(true);
+
+      // Decode audio
+      const binaryString = atob(data.audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i) & 0xff;
+      }
+
+      const avatar = avatarRef.current;
+      const audioCtx = avatar.audioCtx || new AudioContext();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+      const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+
+      const audioObject = {
+        audio: audioBuffer,
+        words: data.words || [],
+        wtimes: data.wtimes || [],
+        wdurations: data.wdurations || [],
+      };
+
+      // Check if interrupted while decoding
+      if (interruptedRef.current || sessionStoppedRef.current) {
+        console.log('🔇 Skipping audio — student interrupted during decode');
+        interruptedRef.current = false;
+        setTutorSpeaking(false);
+        setStatusText('Session active');
+        isProcessingRef.current = false;
+        processNextItem();
+        return;
+      }
+
+      // Speak with lip sync
+      await avatar.speakAudio(
+        audioObject,
+        { lipsyncLang: 'en', pcmSampleRate: audioBuffer.sampleRate },
+        (subtitle) => { console.log('Subtitle:', subtitle); }
+      );
+
+      setTutorSpeaking(false);
+      if (!sessionStoppedRef.current) setStatusText('Session active');
+    } catch (error) {
+      console.error('Error processing queue item:', error);
+      setTutorSpeaking(false);
+      if (!sessionStoppedRef.current) setStatusText('Session active');
+    } finally {
+      isProcessingRef.current = false;
+      if (itemQueueRef.current.length === 0 && interruptedQueueBackupRef.current.length > 0) {
+        resumeInterruptedTeaching();
+        return;
+      }
+      processNextItem();
+    }
+  };
+
+  const resumeInterruptedTeaching = async () => {
+    try {
+      setStatusText('Continuing...');
+      const res = await fetch('http://localhost:8000/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'Now, continuing with what I was explaining earlier.' }),
+      });
+      if (!res.ok) throw new Error(`TTS status ${res.status}`);
+      const ttsData = await res.json();
+      itemQueueRef.current = [{
+        audio: ttsData.audio,
+        words: ttsData.words || [],
+        wtimes: ttsData.wtimes || [],
+        wdurations: ttsData.wdurations || [],
+        boardresponse: null,
+        targetPage: null,
+      }, ...interruptedQueueBackupRef.current];
+    } catch (err) {
+      console.error('Failed to generate connecting sentence:', err);
+      itemQueueRef.current = interruptedQueueBackupRef.current;
+    }
+    interruptedQueueBackupRef.current = [];
+    processNextItem();
   };
 
   // =====================================================================
@@ -176,10 +321,10 @@ const Page = () => {
       processorRef.current = null;
     }
     analyserRef.current = null;
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => { });
-      audioContextRef.current = null;
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close();
     }
+    audioContextRef.current = null;
 
     // Reset switches
     isSpeakingRef.current = false;
@@ -288,16 +433,18 @@ const Page = () => {
       }
 
       // Phase C: AI Guard (Interruptible)
-      // Student must speak 2.5x louder than normal to interrupt the tutor.
       // Once interrupted, threshold drops back to normal.
       if (isTutorSpeakingRef.current) {
-        const INTERRUPT_MULTIPLIER = 1.25;
+        const INTERRUPT_MULTIPLIER = 0.5;
         const interruptThreshold = Math.max(noiseFloorRef.current * INTERRUPT_MULTIPLIER, 15);
         console.log("My Vol", volume);
         console.log("interruptThreshold", interruptThreshold);
         if (volume > interruptThreshold) {
           // Student interrupted! Stop tutor immediately
+          interruptedQueueBackupRef.current = itemQueueRef.current.splice(0);
+          isProcessingRef.current = false;
           stopTutorSpeech();
+          interruptedRef.current = true;
           if (tutorCooldownRef.current) {
             clearTimeout(tutorCooldownRef.current);
             tutorCooldownRef.current = null;
@@ -395,7 +542,6 @@ const Page = () => {
       setupPCMStreaming(micStream);
 
       setStatusText('Calibrating mic...');
-      addMessage('AI', 'Session started. Speak whenever you want.');
 
       // Tell Python what subject we are learning today
       const contextPayload = {
@@ -431,6 +577,10 @@ const Page = () => {
     setStatusText('Stopping session...');
 
     try {
+      itemQueueRef.current = [];
+      isProcessingRef.current = false;
+      interruptedQueueBackupRef.current = [];
+
       if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
       if (tutorCooldownRef.current) clearTimeout(tutorCooldownRef.current);
       silenceTimeoutRef.current = null;
@@ -521,107 +671,38 @@ const Page = () => {
     };
 
     // When Python sends EdgeTTS Audio back!
-    const handleAIReply = async (data) => {
+    const handleAIReply = (data) => {
       if (sessionStoppedRef.current) return;
 
-      if (data?.text) addMessage('AI', data.text);
-      if (!data?.audio || !tutorInstance.current) {
-        setStatusText('Session active');
-        return;
+      itemQueueRef.current.push(data);
+
+      if (!isProcessingRef.current) {
+        processNextItem();
       }
-
-      try {
-        setStatusText('Tutor speaking...');
-        setTutorSpeaking(true);
-
-        // Decode audio
-        const binaryString = atob(data.audio);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i) & 0xff;
-        }
-
-        const tutor = tutorInstance.current;
-        const audioCtx = tutor.audioCtx || new AudioContext();
-        if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-        const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
-
-        // Create audio object with viseme data
-        const audioObject = {
-          audio: audioBuffer,
-          words: data.words || [],
-          wtimes: data.wtimes || [],
-          wdurations: data.wdurations || [],
-        };
-
-        // Speak with lip sync
-        await tutor.speakAudio(
-          audioObject,
-          { lipsyncLang: 'en', pcmSampleRate: audioBuffer.sampleRate },
-          (subtitle) => { console.log('Subtitle:', subtitle); }
-        );
-
-        setTutorSpeaking(false);
-        if (!sessionStoppedRef.current) setStatusText('Session active');
-      } catch (error) {
-        console.error('Error while tutor speaking:', error);
-        setTutorSpeaking(false);
-        if (!sessionStoppedRef.current) setStatusText('Session active');
-      }
-    };
-
-    const handleBoardUpdate = (data) => {
-      if (sessionStoppedRef.current) return;
-      const inst = tutorInstance.current;
-      if (!inst?.drawOnBoard || !data?.boardresponse) return;
-
-      // Safety: y-slot only — prevents two texts at same y line
-      const usedYSlots = new Set();
-      if (data.boardresponse.commands) {
-        for (const cmd of data.boardresponse.commands) {
-          if (cmd.type === 'text' || cmd.type === 'header') {
-            while (usedYSlots.has(cmd.y) && cmd.y < 540) cmd.y += 50;
-            usedYSlots.add(cmd.y);
-          }
-        }
-      }
-
-      inst.drawOnBoard(data.boardresponse);
-
-      const br = data.boardresponse;
-      if (br?.action === 'showimage' && br.page && docInfoRef.current?.total_pages) {
-        socket.emit('request_board_image', { page: br.page });
-      }
-
-      updateBoardPageState();
     };
 
     const handleBoardImage = (data) => {
       if (sessionStoppedRef.current) return;
-      const inst = tutorInstance.current;
-      if (inst?.displayBoardImage && data) {
-        inst.displayBoardImage(data);
+      const board = boardRef.current;
+      if (board?.displayBoardImage && data) {
+        board.displayBoardImage(data);
       }
     };
 
     socket.off('connect');
     socket.off('disconnect');
     socket.off('ai_reply');
-    socket.off('board_update');
     socket.off('board_image');
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('ai_reply', handleAIReply);
-    socket.on('board_update', handleBoardUpdate);
     socket.on('board_image', handleBoardImage);
 
     return () => {
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
       socket.off('ai_reply', handleAIReply);
-      socket.off('board_update', handleBoardUpdate);
       socket.off('board_image', handleBoardImage);
     };
   }, []);
@@ -640,6 +721,7 @@ const Page = () => {
       cleanupMic();
       if (socket.connected) socket.disconnect();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // =====================================================================
@@ -682,19 +764,17 @@ const Page = () => {
             </p>
           </div>
           <div className="w-full h-full bg-slate-100 relative">
-            <TalkingTutor
-              avatarPath="/avatars/female-avatar4.glb"
-              onReady={(instance) => {
-                tutorInstance.current = instance;
-                console.log('TalkingTutor instance received:', instance);
-                setIsTutorReady(true);
+            <BoardCanvas
+              onReady={(boardInstance) => {
+                boardRef.current = boardInstance;
+                console.log('BoardCanvas instance received:', boardInstance);
                 updateBoardPageState();
               }}
             />
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 bg-black/50 backdrop-blur-sm rounded-full px-4 py-2 text-white text-sm">
               <button
                 onClick={() => {
-                  tutorInstance.current?.navigateToPage?.(boardCurrentPage - 1);
+                  boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
                   updateBoardPageState();
                 }}
                 disabled={boardCurrentPage <= 1}
@@ -707,7 +787,7 @@ const Page = () => {
               </span>
               <button
                 onClick={() => {
-                  tutorInstance.current?.navigateToPage?.(boardCurrentPage + 1);
+                  boardRef.current?.navigateToPage?.(boardCurrentPage + 1);
                   updateBoardPageState();
                 }}
                 disabled={boardCurrentPage >= boardTotalPages}
@@ -718,9 +798,9 @@ const Page = () => {
               <span className="w-px h-4 bg-white/20 mx-1" />
               <button
                 onClick={() => {
-                  const inst = tutorInstance.current;
-                  if (!inst?.saveAllPages) return;
-                  const pages = inst.saveAllPages();
+                  const board = boardRef.current;
+                  if (!board?.saveAllPages) return;
+                  const pages = board.saveAllPages();
                   if (!pages || pages.length === 0) return;
                   pages.forEach((dataURL, i) => {
                     const link = document.createElement('a');
@@ -738,19 +818,12 @@ const Page = () => {
           </div>
         </div>
 
-        <div className="w-80 flex flex-col gap-6">
-          <div className="flex-1 bg-white rounded-[2rem] border border-slate-200 p-6 flex flex-col shadow-sm">
-            <h3 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-4">Conversation</h3>
-            <div className="flex-1 overflow-y-auto space-y-4 pr-2 text-sm text-slate-600">
-              {messages.map((msg, index) => (
-                <div key={index} className={`p-3 rounded-2xl ${msg.sender === 'AI' ? 'bg-slate-50 rounded-tl-none' : 'bg-indigo-50 rounded-tr-none ml-6'}`}>
-                  <p><b className={msg.sender === 'AI' ? 'text-indigo-600' : 'text-slate-700'}>{msg.sender}:</b> {msg.text}</p>
-                </div>
-              ))}
-              <p className="opacity-50 italic text-xs text-center pt-2">
-                {isSessionActive ? (isMuted ? '🔇 Mic is muted' : 'Mic is active. Speak naturally...') : 'Start the session to begin.'}
-              </p>
-            </div>
+        <div className="w-80 flex flex-col">
+          <div className="flex-1 relative rounded-[2rem] overflow-hidden shadow-2xl">
+            <TalkingTutor
+              avatarPath="/avatars/female-avatar4.glb"
+              onReady={handleAvatarReady}
+            />
           </div>
         </div>
       </main>

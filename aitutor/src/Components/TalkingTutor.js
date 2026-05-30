@@ -4,15 +4,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { LipsyncEn } from './lipsync-en.mjs';
-import {
-  initFont, isFontReady, analyzeText, drawAnimatedText, drawFullText
-} from './boardAnimation.js';
-
-if (typeof document !== 'undefined') {
-  const style = document.createElement('style');
-  style.textContent = `@font-face { font-family: 'Patrick Hand'; src: url('/fonts/PatrickHand-Regular.ttf') format('truetype'); }`;
-  document.head.appendChild(style);
-}
 
 const lipsync = new LipsyncEn();
 
@@ -22,13 +13,8 @@ const VISEME_TARGETS = [
   'viseme_I','viseme_O','viseme_U'
 ];
 
-const BOARD_W = 800;
-const BOARD_H = 600;
-const CHAR_DRAW_DURATION = 0.055;
-
 export default function TalkingTutor({ avatarPath, onReady }) {
   const containerRef = useRef(null);
-  const boardCanvasRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState(null);
 
@@ -43,372 +29,6 @@ export default function TalkingTutor({ avatarPath, onReady }) {
   const isPlayingRef = useRef(false);
   const audioStartTimeRef = useRef(0);
   const visemeTimelineRef = useRef([]);
-
-  const boardPagesRef = useRef([{ id: 1, commands: [], image: null }]);
-  const currentPageIndexRef = useRef(0);
-  const pageIdCounterRef = useRef(2);
-  const drawTimersRef = useRef([]);
-
-  const fontLoadedRef = useRef(false);
-  const boardAnimFrameRef = useRef(null);
-  const animStartTimeRef = useRef(0);
-  const animatingCmdsRef = useRef([]);
-
-  const getCtx = useCallback(() => {
-    const canvas = boardCanvasRef.current;
-    return canvas ? canvas.getContext('2d') : null;
-  }, []);
-
-  function drawCommand(ctx, cmd, cw, ch, progress = 1) {
-    const sx = cw / BOARD_W;
-    const sy = ch / BOARD_H;
-    const color = cmd.color || '#FFFFFF';
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    switch (cmd.type) {
-      case 'header':
-      case 'text': {
-        const content = cmd.content || '';
-        const fontSize = cmd.size * sy || 32 * sy;
-        const px = cmd.x * sx;
-        const py = cmd.y * sy;
-
-        if (cmd._glyphData && fontLoadedRef.current) {
-          drawAnimatedText(ctx, cmd._glyphData, progress, {
-            x: px, y: py, color, lineWidth: Math.max(2, fontSize * 0.1),
-            showCursor: progress > 0 && progress < 1,
-          });
-        } else {
-          ctx.font = `bold ${fontSize}px "Patrick Hand", "Segoe UI", Arial, sans-serif`;
-          ctx.textBaseline = 'top';
-          ctx.shadowColor = 'rgba(255,255,255,0.08)';
-          ctx.shadowBlur = 2 * sy;
-          ctx.globalAlpha = progress;
-          ctx.fillText(content, px, py);
-          ctx.globalAlpha = 1;
-          ctx.shadowBlur = 0;
-        }
-        break;
-      }
-      case 'line': {
-        ctx.lineWidth = 4 * sy;
-        ctx.globalAlpha = progress;
-        ctx.beginPath();
-        ctx.moveTo(cmd.x1 * sx, cmd.y1 * sy);
-        ctx.lineTo(cmd.x2 * sx, cmd.y2 * sy);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        break;
-      }
-      case 'arrow': {
-        ctx.lineWidth = 4 * sy;
-        const ax = cmd.x1 * sx, ay = cmd.y1 * sy;
-        const bx = cmd.x2 * sx, by = cmd.y2 * sy;
-        const angle = Math.atan2(by - ay, bx - ax);
-        const headLen = 12 * sy;
-        ctx.globalAlpha = progress;
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        ctx.lineTo(bx, by);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(bx, by);
-        ctx.lineTo(bx - headLen * Math.cos(angle - 0.4), by - headLen * Math.sin(angle - 0.4));
-        ctx.lineTo(bx - headLen * Math.cos(angle + 0.4), by - headLen * Math.sin(angle + 0.4));
-        ctx.closePath();
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        break;
-      }
-      case 'rect': {
-        ctx.lineWidth = 4 * sy;
-        const rx = cmd.x * sx, ry = cmd.y * sy;
-        const rw = cmd.w * sx, rh = cmd.h * sy;
-        ctx.globalAlpha = progress;
-        if (cmd.fill) {
-          ctx.fillStyle = color;
-          ctx.globalAlpha = 0.15 * progress;
-          ctx.fillRect(rx, ry, rw, rh);
-        }
-        ctx.strokeRect(rx, ry, rw, rh);
-        ctx.globalAlpha = 1;
-        break;
-      }
-      case 'circle': {
-        ctx.lineWidth = 4 * sy;
-        ctx.globalAlpha = progress;
-        ctx.beginPath();
-        ctx.arc(cmd.cx * sx, cmd.cy * sy, cmd.r * sx, 0, Math.PI * 2);
-        if (cmd.fill) {
-          ctx.fillStyle = color;
-          ctx.globalAlpha = 0.15 * progress;
-          ctx.fill();
-        }
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        break;
-      }
-      case 'curve': {
-        ctx.lineWidth = 4 * sy;
-        const pts = cmd.points || [];
-        if (pts.length >= 4) {
-          ctx.globalAlpha = progress;
-          ctx.beginPath();
-          ctx.moveTo(pts[0][0] * sx, pts[0][1] * sy);
-          ctx.bezierCurveTo(
-            pts[2][0] * sx, pts[2][1] * sy,
-            pts[3][0] * sx, pts[3][1] * sy,
-            pts[1][0] * sx, pts[1][1] * sy
-          );
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-        break;
-      }
-      case 'showimage': {
-        const page = boardPagesRef.current[currentPageIndexRef.current];
-        if (page?.image) {
-          const img = new Image();
-          img.onload = () => {
-            const dx = (cmd.x || 0) * sx;
-            const dy = (cmd.y || 0) * sy;
-            const dw = (cmd.w || BOARD_W) * sx;
-            const dh = (cmd.h || BOARD_H) * sy;
-            ctx.globalAlpha = (cmd.opacity ?? 0.7) * progress;
-            ctx.drawImage(img, dx, dy, dw, dh);
-            ctx.globalAlpha = 1;
-          };
-          img.src = page.image;
-        }
-        break;
-      }
-    }
-  }
-
-  const renderPage = useCallback((pageIndex) => {
-    const ctx = getCtx();
-    const canvas = boardCanvasRef.current;
-    if (!ctx || !canvas) return;
-
-    const pages = boardPagesRef.current;
-    if (pageIndex < 0 || pageIndex >= pages.length) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const page = pages[pageIndex];
-    if (page.image) {
-      const img = new Image();
-      img.src = page.image;
-      ctx.globalAlpha = 1;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    }
-
-    for (const cmd of page.commands) {
-      const prog = cmd._progress !== undefined ? cmd._progress : 1;
-      drawCommand(ctx, cmd, canvas.width, canvas.height, prog);
-    }
-  }, [getCtx]);
-
-  function startBoardAnimationLoop() {
-    if (boardAnimFrameRef.current) cancelAnimationFrame(boardAnimFrameRef.current);
-
-    if (animatingCmdsRef.current.length === 0) return;
-
-    const animate = () => {
-      const elapsed = isPlayingRef.current && audioContextRef.current
-        ? audioContextRef.current.currentTime - audioStartTimeRef.current
-        : (performance.now() - animStartTimeRef.current) / 1000;
-
-      let allDone = true;
-
-      for (const cmd of animatingCmdsRef.current) {
-        const cmdTime = cmd.time || 0;
-        const dur = cmd._duration || Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
-        const localElapsed = elapsed - cmdTime;
-
-        if (localElapsed <= 0) {
-          cmd._progress = 0;
-          allDone = false;
-        } else if (localElapsed >= dur) {
-          cmd._progress = 1;
-        } else {
-          cmd._progress = localElapsed / dur;
-          allDone = false;
-        }
-      }
-
-      renderPage(currentPageIndexRef.current);
-
-      if (!allDone) {
-        boardAnimFrameRef.current = requestAnimationFrame(animate);
-      } else {
-        boardAnimFrameRef.current = null;
-        animatingCmdsRef.current = [];
-        for (const cmd of (boardPagesRef.current[currentPageIndexRef.current]?.commands || [])) {
-          delete cmd._progress;
-        }
-      }
-    };
-
-    boardAnimFrameRef.current = requestAnimationFrame(animate);
-  }
-
-  const scheduleTimedDraws = useCallback((commands) => {
-    drawTimersRef.current.forEach(t => clearTimeout(t));
-    drawTimersRef.current = [];
-
-    const animCmds = [];
-    for (const cmd of commands) {
-      if ((cmd.type === 'text' || cmd.type === 'header') && cmd._glyphData) {
-        cmd._progress = 0;
-        cmd._duration = cmd._duration || Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
-        animCmds.push(cmd);
-      }
-    }
-
-    if (animCmds.length > 0) {
-      animatingCmdsRef.current = animCmds;
-      animStartTimeRef.current = isPlayingRef.current && audioContextRef.current
-        ? audioContextRef.current.currentTime
-        : performance.now();
-      startBoardAnimationLoop();
-    }
-  }, []);
-
-  const drawOnBoard = useCallback((boardresponse) => {
-    if (!boardresponse || typeof boardresponse !== 'object') return;
-
-    const { action, commands } = boardresponse;
-
-    if (action === 'newpage') {
-      boardPagesRef.current.push({ id: pageIdCounterRef.current++, commands: [] });
-      currentPageIndexRef.current = boardPagesRef.current.length - 1;
-    } else if (action === 'gotopage') {
-      const target = Number(boardresponse.page) || 1;
-      if (target >= 1 && target <= boardPagesRef.current.length) {
-        currentPageIndexRef.current = target - 1;
-      }
-    } else if (action === 'erasepage') {
-      boardPagesRef.current[currentPageIndexRef.current].commands = [];
-    }
-
-    if (!commands || !Array.isArray(commands)) {
-      renderPage(currentPageIndexRef.current);
-      return;
-    }
-
-    const page = boardPagesRef.current[currentPageIndexRef.current];
-    const animatedCmds = [];
-
-    for (const cmd of commands) {
-      if (cmd.type === 'erase') {
-        if (cmd.target === 'last' && page.commands.length > 0) {
-          page.commands.pop();
-        } else if (cmd.target === 'all') {
-          page.commands = [];
-        } else if (cmd.target === 'index' && typeof cmd.index === 'number') {
-          page.commands.splice(cmd.index, 1);
-        }
-      } else if (cmd.type === 'clear') {
-        page.commands = [];
-      } else {
-        if (cmd.type === 'text' || cmd.type === 'header') {
-          const fontSize = cmd.size || 32;
-          const glyphData = isFontReady() ? analyzeText(cmd.content || '', fontSize) : null;
-          if (glyphData) {
-            cmd._glyphData = glyphData;
-            cmd._progress = 0;
-            cmd._duration = Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
-            animatedCmds.push(cmd);
-          }
-        }
-        page.commands.push(cmd);
-      }
-    }
-
-    renderPage(currentPageIndexRef.current);
-
-    if (animatedCmds.length > 0) {
-      animatingCmdsRef.current = animatedCmds;
-      animStartTimeRef.current = isPlayingRef.current && audioContextRef.current
-        ? audioContextRef.current.currentTime
-        : performance.now();
-      startBoardAnimationLoop();
-    } else {
-      scheduleTimedDraws(commands);
-    }
-  }, [renderPage, scheduleTimedDraws]);
-
-  const displayBoardImage = useCallback(({ page, image_base64 }) => {
-    const idx = currentPageIndexRef.current;
-    boardPagesRef.current[idx] = {
-      ...boardPagesRef.current[idx],
-      commands: boardPagesRef.current[idx]?.commands || [],
-      image: image_base64,
-    };
-    renderPage(idx);
-  }, [renderPage]);
-
-  const clearBoard = useCallback(() => {
-    boardPagesRef.current[currentPageIndexRef.current].commands = [];
-    renderPage(currentPageIndexRef.current);
-  }, [renderPage]);
-
-  const saveBoardAsImage = useCallback(() => {
-    const canvas = boardCanvasRef.current;
-    if (!canvas) return null;
-    return canvas.toDataURL('image/png');
-  }, []);
-
-  const saveAllPages = useCallback(() => {
-    const pages = boardPagesRef.current;
-    return pages.map((_, idx) => {
-      const offscreen = document.createElement('canvas');
-      offscreen.width = BOARD_W;
-      offscreen.height = BOARD_H;
-      const octx = offscreen.getContext('2d');
-      if (!octx) return null;
-
-      octx.fillStyle = '#1a1a2e';
-      octx.fillRect(0, 0, BOARD_W, BOARD_H);
-
-      for (const cmd of pages[idx].commands) {
-        if (cmd._glyphData) {
-          const color = cmd.color || '#FFFFFF';
-          const fontSize = cmd.size || 32;
-          drawFullText(octx, cmd._glyphData, {
-            x: cmd.x, y: cmd.y, color,
-            lineWidth: Math.max(2, fontSize * 0.1),
-          });
-        } else {
-          drawCommand(octx, cmd, BOARD_W, BOARD_H);
-        }
-      }
-
-      return offscreen.toDataURL('image/png');
-    });
-  }, []);
-
-  const navigateToPage = useCallback((n) => {
-    if (n < 1 || n > boardPagesRef.current.length) return;
-    if (boardAnimFrameRef.current) {
-      cancelAnimationFrame(boardAnimFrameRef.current);
-      boardAnimFrameRef.current = null;
-    }
-    animatingCmdsRef.current = [];
-    currentPageIndexRef.current = n - 1;
-    renderPage(n - 1);
-  }, [renderPage]);
-
-  const getBoardState = useCallback(() => ({
-    currentPage: currentPageIndexRef.current + 1,
-    totalPages: boardPagesRef.current.length,
-  }), []);
 
   function getInterpolatedVisemes(time) {
     const timeline = visemeTimelineRef.current;
@@ -503,9 +123,9 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     fillLight.position.set(-5, 5, 4);
     sceneRef.current.add(fillLight);
 
-    cameraRef.current = new THREE.PerspectiveCamera(48, containerRef.current.clientWidth / containerRef.current.clientHeight, 0.1, 100);
-    cameraRef.current.position.set(0, 1.65, 3.4);
-    cameraRef.current.lookAt(0, 1.35, 0);
+    cameraRef.current = new THREE.PerspectiveCamera(50, containerRef.current.clientWidth / containerRef.current.clientHeight, 0.1, 100);
+    cameraRef.current.position.set(0, 2.1, 4.0);
+    cameraRef.current.lookAt(0, 0.7, 0);
 
     rendererRef.current = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     rendererRef.current.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
@@ -531,12 +151,11 @@ export default function TalkingTutor({ avatarPath, onReady }) {
           modelRef.current.position.set(0, 0, 0);
           modelRef.current.position.x -= center.x;
           modelRef.current.position.z -= center.z;
-          modelRef.current.position.y = -center.y - 0.7;
+          modelRef.current.position.y = -center.y - 2.7;
 
           const maxDim = Math.max(size.x, size.y, size.z);
-          modelRef.current.scale.setScalar(3.2 / maxDim);
+          modelRef.current.scale.setScalar(5.8 / maxDim);
 
-          // Remap morphTargetDictionary using semantic names from extras.targetNames
           modelRef.current.traverse((child) => {
             if (!child.isMesh || !child.geometry?.morphAttributes?.position) return;
             const targetNames = child.userData?.targetNames;
@@ -548,7 +167,6 @@ export default function TalkingTutor({ avatarPath, onReady }) {
             child.morphTargetDictionary = dict;
           });
 
-          // Tint skin meshes to light/fair complexion
           modelRef.current.traverse((child) => {
             if (!child.isMesh) return;
             if (child.name === 'Wolf3D_Head' || child.name === 'Wolf3D_Body') {
@@ -557,6 +175,55 @@ export default function TalkingTutor({ avatarPath, onReady }) {
                 mat.color.setHex(0xF5D0C5);
                 if (Array.isArray(mat)) mat.forEach(m => m.color.setHex(0xF5D0C5));
               }
+            }
+          });
+
+          const poses = {
+            'LeftShoulder': { x: 1.597, y: -0.012, z: -1.816 },
+            'LeftArm': { x: 0.618, y: 1.274, z: 0.266 },
+            'LeftForeArm': { x: -0.395, y: 0.097, z: 1.342 },
+            'LeftHand': { x: -0.816, y: 0.057, z: 0.976 },
+            'LeftHandThumb1': { x: 0.42, y: -0.23, z: 1.172 },
+            'LeftHandThumb2': { x: -0.027, y: -0.361, z: -0.122 },
+            'LeftHandThumb3': { x: 0.076, y: -0.125, z: 0.371 },
+            'LeftHandIndex1': { x: -0.158, y: 0.045, z: -0.033 },
+            'LeftHandIndex2': { x: 0.391, y: -0.051, z: -0.025 },
+            'LeftHandIndex3': { x: 0.317, y: -0.058, z: -0.07 },
+            'LeftHandMiddle1': { x: 0.486, y: -0.066, z: -0.014 },
+            'LeftHandMiddle2': { x: 0.718, y: -0.055, z: -0.07 },
+            'LeftHandMiddle3': { x: 0.453, y: -0.019, z: -0.013 },
+            'LeftHandRing1': { x: 0.591, y: -0.241, z: -0.11 },
+            'LeftHandRing2': { x: 0.531, y: -0.019, z: -0.059 },
+            'LeftHandRing3': { x: 0.517, y: -0.016, z: -0.057 },
+            'LeftHandPinky1': { x: 0.494, y: -0.233, z: -0.101 },
+            'LeftHandPinky2': { x: 0.32, y: -0.016, z: -0.061 },
+            'LeftHandPinky3': { x: 0.317, y: -0.016, z: -0.057 },
+            'RightShoulder': { x: 1.597, y: 0.012, z: 1.816 },
+            'RightArm': { x: 0.618, y: -1.274, z: -0.266 },
+            'RightForeArm': { x: -0.395, y: -0.097, z: -1.342 },
+            'RightHand': { x: -0.816, y: -0.057, z: -0.976 },
+            'RightHandThumb1': { x: 0.42, y: 0.23, z: -1.172 },
+            'RightHandThumb2': { x: -0.027, y: 0.361, z: 0.122 },
+            'RightHandThumb3': { x: 0.076, y: 0.125, z: -0.371 },
+            'RightHandIndex1': { x: -0.158, y: -0.045, z: 0.033 },
+            'RightHandIndex2': { x: 0.391, y: 0.051, z: 0.025 },
+            'RightHandIndex3': { x: 0.317, y: 0.058, z: 0.07 },
+            'RightHandMiddle1': { x: 0.486, y: 0.066, z: 0.014 },
+            'RightHandMiddle2': { x: 0.718, y: 0.055, z: 0.07 },
+            'RightHandMiddle3': { x: 0.453, y: 0.019, z: 0.013 },
+            'RightHandRing1': { x: 0.591, y: 0.241, z: 0.11 },
+            'RightHandRing2': { x: 0.531, y: 0.019, z: 0.059 },
+            'RightHandRing3': { x: 0.517, y: 0.016, z: 0.057 },
+            'RightHandPinky1': { x: 0.494, y: 0.233, z: 0.101 },
+            'RightHandPinky2': { x: 0.32, y: 0.016, z: 0.061 },
+            'RightHandPinky3': { x: 0.317, y: 0.016, z: 0.057 },
+          };
+
+          modelRef.current.traverse((child) => {
+            if (!child.isBone) return;
+            const pose = poses[child.name];
+            if (pose) {
+              child.rotation.set(pose.x, pose.y, pose.z);
             }
           });
 
@@ -621,21 +288,24 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     }
   }
 
-  function stopSpeaking() {
+  const stopSpeaking = useCallback(() => {
     if (isPlayingRef.current && audioSourceRef.current) {
-      try { audioSourceRef.current.stop(); } catch (e) { }
+      try { gainNodeRef.current.gain.setValueAtTime(0, audioContextRef.current.currentTime); } catch (e) { }
+      try { audioSourceRef.current.stop(); } catch (e) {
+        try { audioSourceRef.current.disconnect(); } catch (e2) { }
+      }
       isPlayingRef.current = false;
     }
     applyVisemesToModel({});
-  }
+  }, []);
 
-  function cancelSpeaking() {
+  const cancelSpeaking = useCallback(() => {
     stopSpeaking();
     visemeTimelineRef.current = [];
     applyVisemesToModel({});
-  }
+  }, [stopSpeaking]);
 
-  async function speakAudio(audioObject, options, callback) {
+  const speakAudio = useCallback(async (audioObject, options, callback) => {
     if (!audioObject || !audioObject.audio) {
       console.warn('No audio data provided');
       return;
@@ -655,6 +325,7 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       audioSourceRef.current = audioContextRef.current.createBufferSource();
       audioSourceRef.current.buffer = audioBuffer;
       audioSourceRef.current.connect(gainNodeRef.current);
+      gainNodeRef.current.gain.setValueAtTime(0.8, audioContextRef.current.currentTime);
 
       const startTime = audioContextRef.current.currentTime + 0.01;
       audioSourceRef.current.start(startTime);
@@ -662,47 +333,35 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       audioStartTimeRef.current = startTime;
       isPlayingRef.current = true;
 
-      audioSourceRef.current.onended = () => {
-        isPlayingRef.current = false;
-        applyVisemesToModel({});
-        callback && callback(null);
-      };
+      await new Promise((resolve) => {
+        audioSourceRef.current.onended = () => {
+          isPlayingRef.current = false;
+          applyVisemesToModel({});
+          callback && callback(null);
+          resolve();
+        };
+      });
 
     } catch (err) {
       console.error('speakAudio error:', err);
       throw err;
     }
-  }
+  }, [stopSpeaking]);
 
   function initAvatarSystem() {
     initThreeJS();
     return loadAvatarModel(avatarPath).then(() => {
       initAudioSystem();
       startAnimationLoop();
-      return initFont();
-    }).then(() => {
-      fontLoadedRef.current = isFontReady();
     });
   }
 
-  const sizeCanvas = useCallback(() => {
-    const canvas = boardCanvasRef.current;
-    if (!canvas) return;
-    const parent = canvas.parentElement;
-    if (!parent) return;
-    const rect = parent.getBoundingClientRect();
-    canvas.width = Math.round(rect.width * window.devicePixelRatio);
-    canvas.height = Math.round(rect.height * window.devicePixelRatio);
-    canvas.style.width = rect.width + 'px';
-    canvas.style.height = rect.height + 'px';
-    renderPage(currentPageIndexRef.current);
-  }, [renderPage]);
-
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
     let cancelled = false;
-    containerRef.current.innerHTML = '';
+    container.innerHTML = '';
 
     initAvatarSystem().then(() => {
       if (cancelled) return;
@@ -713,15 +372,8 @@ export default function TalkingTutor({ avatarPath, onReady }) {
           stop: stopSpeaking,
           stopSpeaking,
           cancelSpeech: cancelSpeaking,
-          drawOnBoard,
-          displayBoardImage,
-          clearBoard,
-          saveBoardAsImage,
-          saveAllPages,
-          navigateToPage,
-          getCurrentPage: () => currentPageIndexRef.current + 1,
-          getTotalPages: () => boardPagesRef.current.length,
-          getBoardState,
+          get audioCtx() { return audioContextRef.current; },
+          get audio() { return audioSourceRef.current; },
         });
       }
     }).catch(err => {
@@ -730,38 +382,26 @@ export default function TalkingTutor({ avatarPath, onReady }) {
       setError(err.message);
     });
 
-    sizeCanvas();
-
     return () => {
       cancelled = true;
-      drawTimersRef.current.forEach(t => clearTimeout(t));
       cancelAnimationFrame(animationFrameRef.current);
-      if (boardAnimFrameRef.current) cancelAnimationFrame(boardAnimFrameRef.current);
       if (audioSourceRef.current) {
         try { audioSourceRef.current.stop(); } catch (e) { }
       }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(console.error);
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
       }
-      if (rendererRef.current && containerRef.current) {
-        containerRef.current.removeChild(rendererRef.current.domElement);
+      if (rendererRef.current && container) {
+        container.removeChild(rendererRef.current.domElement);
       }
     };
-  }, [avatarPath]);
+  }, [avatarPath, onReady, speakAudio, stopSpeaking, cancelSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="w-full h-[600px] rounded-[2rem] overflow-hidden relative shadow-2xl">
-      <canvas
-        ref={boardCanvasRef}
-        className="absolute inset-0 w-full h-full"
-        style={{ background: '#1a1a2e', display: 'block' }}
-      />
-      <div
-        ref={containerRef}
-        className="pointer-events-none"
-        style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}
-      />
-      <div className="absolute inset-0 bg-black/10 pointer-events-none shadow-inner" style={{ zIndex: 2 }} />
-    </div>
+    <div
+      ref={containerRef}
+      className="pointer-events-none w-full h-full rounded-[2rem] overflow-hidden shadow-2xl"
+      style={{ position: 'absolute', top: 0, left: 0 }}
+    />
   );
 }

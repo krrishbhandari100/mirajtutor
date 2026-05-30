@@ -191,6 +191,23 @@ async def upload_document(file: UploadFile = File(...), sid: str = Form(...)):
 
 
 # ============================================================================
+# TEXT-TO-SPEECH ENDPOINT (for connecting sentence playback)
+# ============================================================================
+
+class TTSRequest(BaseModel):
+    text: str
+
+@app.post("/tts")
+async def generate_tts(request: TTSRequest):
+    try:
+        payload = await build_ai_reply_payload(request.text)
+        return payload
+    except Exception as e:
+        print(f"TTS error: {e}")
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+
+
+# ============================================================================
 # SOCKET.IO SERVER
 # ============================================================================
 
@@ -395,8 +412,9 @@ async def speech_ended(sid):
         system_prompt = ctx.get('prevCtx', '')
         current_history = chat_histories.get(sid, [])
         
-        board_pages = session_board_pages.get(sid, {"current": 1, "total": 1})
-        board_ctx = f"Page {board_pages['current']} of {board_pages['total']}"
+        board_pages = session_board_pages.get(sid, {"current": 1, "total": 1, "cmd_count": 0})
+        cmd_count = board_pages.get('cmd_count', 0)
+        board_ctx = f"Page {board_pages['current']} of {board_pages['total']} ({cmd_count} items on board, LIMIT ~8 items before overwriting)"
 
         doc_info = uploaded_documents.get(sid, {})
         doc_text = doc_info.get("text", "")
@@ -430,7 +448,7 @@ async def speech_ended(sid):
         # --- ROBUST JSON EXTRACTION ---
         speaking_text = ai_response_text 
         clean_json_str = None
-        board_update = {'writingresponse': '', 'visualresponse': None, 'boardresponse': None}
+        chunks = None
 
         def strip_markdown_fences(text):
             text = text.strip()
@@ -463,8 +481,15 @@ async def speech_ended(sid):
                 result.append(ch)
             return ''.join(result)
 
+        def repair_json(text):
+            """Fix common JSON issues from LLM output."""
+            text = re.sub(r',\s*([}\]])', r'\1', text)
+            text = re.sub(r'\}\s*\{', '},{', text)
+            text = re.sub(r'\]\s*\[', '],[', text)
+            return text
+
         def extract_speaking_fallback(raw):
-            m = re.search(r'content\s*:\s*["\']?(.*?)(?:["\']?\s*,\s*(?:\w+|"\w+")\s*:|\s*,\s*boardresponse|\s*,\s*writingresponse|\s*,\s*visualresponse)', raw, re.DOTALL)
+            m = re.search(r'content\s*:\s*["\']?(.*?)(?:["\']?\s*,\s*(?:\w+|"\w+")\s*:|\s*,\s*boardresponse)', raw, re.DOTALL)
             if m:
                 return m.group(1).strip()
             m = re.search(r'(?:speakingresponse|"speakingresponse")\s*:\s*["\']?(.*?)["\']?\s*(?:,\s*(?:\w+|"\w+")\s*:|\Z)', raw, re.DOTALL)
@@ -476,55 +501,100 @@ async def speech_ended(sid):
             clean_for_parse = strip_markdown_fences(ai_response_text)
             match = re.search(r'\{.*\}', clean_for_parse, re.DOTALL)
             if match:
-                clean_json_str = sanitize_json_newlines(match.group(0).strip())
+                clean_json_str = repair_json(match.group(0).strip())
+                clean_json_str = sanitize_json_newlines(clean_json_str)
                 ai_response, _ = json.JSONDecoder().raw_decode(clean_json_str)
-                speaking_text = ai_response.get('speakingresponse', "I am ready to help.")
-                board_update['writingresponse'] = ai_response.get('writingresponse', '')
-                board_update['visualresponse'] = ai_response.get('visualresponse', None)
-                board_update['boardresponse'] = ai_response.get('boardresponse')
 
-                # Track board page changes
-                br = ai_response.get('boardresponse', {})
-                if isinstance(br, dict) and br.get('action') == 'newpage':
-                    session_board_pages[sid]['total'] += 1
-                    session_board_pages[sid]['current'] = session_board_pages[sid]['total']
-                elif isinstance(br, dict) and br.get('action') == 'gotopage':
-                    target = br.get('page', 0)
-                    if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
-                        session_board_pages[sid]['current'] = target
+                # New format: data array of teaching chunks
+                if 'data' in ai_response and isinstance(ai_response['data'], list):
+                    chunks = ai_response['data']
+                    speaking_text = ' '.join(
+                        c.get('speakingresponse', '') for c in chunks if c.get('speakingresponse')
+                    )
+                    print(f"📦 PARSED {len(chunks)} teaching chunks from data array")
+                else:
+                    # Old format: flat speakingresponse + boardresponse
+                    speaking_text = ai_response.get('speakingresponse', "I am ready to help.")
+                    single_board = ai_response.get('boardresponse')
+                    if single_board:
+                        chunks = [{'speakingresponse': speaking_text, 'boardresponse': single_board}]
             else:
                 print("⚠️ No JSON block found — trying fallback extraction")
                 fallback = extract_speaking_fallback(ai_response_text)
                 speaking_text = fallback if fallback else "I heard you, but I could not generate a proper response."
+                if speaking_text:
+                    chunks = [{'speakingresponse': speaking_text, 'boardresponse': {}}]
         except Exception as e:
             print(f"❌ Failed to parse Ollama JSON: {e}")
             fallback = extract_speaking_fallback(ai_response_text)
             speaking_text = fallback if fallback else "I heard you, but I could not generate a proper response."
+            if speaking_text:
+                chunks = [{'speakingresponse': speaking_text, 'boardresponse': {}}]
 
         if not speaking_text.strip():
             speaking_text = "I heard you, but I could not generate a response."
+            chunks = [{'speakingresponse': speaking_text, 'boardresponse': {}}]
 
-        # Strip markdown symbols before TTS (prevents "asterisk" pronunciation)
-        speaking_text = re.sub(r'[\*_#]+', '', speaking_text)
-        speaking_text = speaking_text.strip()
+        if chunks:
+            for chunk in chunks:
+                text = chunk.get('speakingresponse', '')
+                chunk['speakingresponse'] = re.sub(r'[\*_#]+', '', text).strip()
 
-        # 💥 SAVE TO HISTORY FOR THE NEXT TURN
-        if clean_json_str:
-            if sid not in chat_histories:
-                chat_histories[sid] = []
-            
-            chat_histories[sid].append({"role": "user", "content": user_text})
-            chat_histories[sid].append({"role": "assistant", "content": clean_json_str})
-            
-            if len(chat_histories[sid]) > 10:
-                chat_histories[sid] = chat_histories[sid][-10:]
+                br = chunk.get('boardresponse', {})
+                if isinstance(br, dict) and br.get('action') == 'newpage':
+                    session_board_pages[sid]['total'] += 1
+                    session_board_pages[sid]['current'] = session_board_pages[sid]['total']
+                    session_board_pages[sid]['cmd_count'] = 0
+                elif isinstance(br, dict) and br.get('action') == 'gotopage':
+                    target = br.get('page', 0)
+                    if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
+                        session_board_pages[sid]['current'] = target
 
-        print(f"🎯 EXTRACTED SPEAKING_TEXT:\n{speaking_text[:300]}\n{'='*60}")
+                # Capture the target page AFTER action is applied
+                chunk['_targetPage'] = session_board_pages[sid]['current']
 
-        print("🔊 Generating speech...")
-        await sio.emit("board_update", board_update, room=sid)
-        payload = await build_ai_reply_payload(speaking_text)
-        await sio.emit("ai_reply", payload, room=sid)
+                if isinstance(br, dict):
+                    action = br.get('action', '')
+                    if action in ('clear', 'erasepage'):
+                        session_board_pages[sid]['cmd_count'] = 0
+                    elif action == 'newpage':
+                        pass
+                    else:
+                        commands = br.get('commands', [])
+                        if commands:
+                            new_items = sum(1 for cmd in commands if cmd.get('type') not in ('erase', 'clear'))
+                            session_board_pages[sid]['cmd_count'] = session_board_pages[sid].get('cmd_count', 0) + new_items
+                        elif br.get('content'):
+                            session_board_pages[sid]['cmd_count'] = session_board_pages[sid].get('cmd_count', 0) + 1
+
+            # 💥 SAVE TO HISTORY FOR THE NEXT TURN
+            if clean_json_str:
+                if sid not in chat_histories:
+                    chat_histories[sid] = []
+
+                chat_histories[sid].append({"role": "user", "content": user_text})
+                chat_histories[sid].append({"role": "assistant", "content": speaking_text})
+
+                if len(chat_histories[sid]) > 10:
+                    first = chat_histories[sid][:2]
+                    rest = chat_histories[sid][2:]
+                    chat_histories[sid] = first + rest[-8:]
+
+            print(f"🎯 EXTRACTED SPEAKING_TEXT:\n{speaking_text[:300]}\n{'='*60}")
+
+            # Generate TTS for all chunks in parallel
+            print(f"🔊 Generating TTS for {len(chunks)} chunks in parallel...")
+            tts_tasks = [build_ai_reply_payload(c['speakingresponse']) for c in chunks]
+            payloads = await asyncio.gather(*tts_tasks)
+            print(f"🔊 All {len(payloads)} TTS payloads ready!")
+
+            # Emit each chunk immediately (frontend queues and plays sequentially)
+            for i, (chunk, payload) in enumerate(zip(chunks, payloads)):
+                payload['boardresponse'] = chunk.get('boardresponse')
+                payload['itemIndex'] = i
+                payload['totalItems'] = len(chunks)
+                payload['targetPage'] = chunk.get('_targetPage', 1)
+                await sio.emit("ai_reply", payload, room=sid)
 
     except Exception as e:
         print(f"❌ speech_ended error for {sid}: {e}")
