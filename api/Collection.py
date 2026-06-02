@@ -1,10 +1,14 @@
 from sqlmodel import Field, SQLModel, create_engine, Session, select, text
 import uuid
 import jwt
+from os import environ
+from pathlib import Path
+from dotenv import load_dotenv
 
-JWT_SECRET = '2f5ca9b6ff3f7dbf2dff679d9d8e5fd1d0dc9c2e447fbc8847041ce04b67b8d9b7de61eb11857cf13363b277a580e4a9a2d2'
-JWT_ALGO = 'HS256'
-SALT = '2f5ca9b6ff3f7dbf2dff679d9d8e5fd1d0dc9c2e447fbc8847041ce04b67b8d9b7de61eb11857cf13363b277a580e4a9a2d2'
+load_dotenv(dotenv_path=Path(__file__).parent / '.env')
+
+JWT_SECRET = environ.get('JWT_SECRET', '2f5ca9b6ff3f7dbf2dff679d9d8e5fd1d0dc9c2e447fbc8847041ce04b67b8d9b7de61eb11857cf13363b277a580e4a9a2d2')
+JWT_ALGO = environ.get('JWT_ALGO', 'HS256')
 
 
 class User(SQLModel, table=True):

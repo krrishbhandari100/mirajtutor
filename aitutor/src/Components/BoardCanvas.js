@@ -230,26 +230,6 @@ export default function BoardCanvas({ onReady }) {
     boardAnimFrameRef.current = requestAnimationFrame(animate);
   }, [renderPage]);
 
-  const scheduleTimedDraws = useCallback((commands) => {
-    drawTimersRef.current.forEach(t => clearTimeout(t));
-    drawTimersRef.current = [];
-
-    const animCmds = [];
-    for (const cmd of commands) {
-      if ((cmd.type === 'text' || cmd.type === 'header') && cmd._glyphData) {
-        cmd._progress = 0;
-        cmd._duration = cmd._duration || Math.max(0.5, (cmd.content || '').length * CHAR_DRAW_DURATION);
-        animCmds.push(cmd);
-      }
-    }
-
-    if (animCmds.length > 0) {
-      animatingCmdsRef.current = animCmds;
-      animStartTimeRef.current = performance.now();
-      startBoardAnimationLoop();
-    }
-  }, [startBoardAnimationLoop]);
-
   const drawOnBoard = useCallback((boardresponse, targetPage) => {
     if (!boardresponse || typeof boardresponse !== 'object') return;
 

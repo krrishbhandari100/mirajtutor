@@ -13,6 +13,12 @@ from Collection import (
 
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
+from os import environ
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(__file__).parent / '.env')
+BCRYPT_SALT = environ.get('BCRYPT_SALT', '$2b$12$76p17W.S2Ic6vBqXpE.8p.').encode('utf-8')
 import time
 import jwt
 import socketio
@@ -85,7 +91,7 @@ def sign_jwt(email: str, first_name: str, last_name: str):
 def signup(user: UserSignUpSchema):
     hashed_password = bcrypt.hashpw(
         user.password.encode("utf-8"),
-        b"$2b$12$76p17W.S2Ic6vBqXpE.8p."
+        BCRYPT_SALT
     ).decode("utf-8")
 
     if check_exists(user.email, hashed_password)[0]:
@@ -105,7 +111,7 @@ def signup(user: UserSignUpSchema):
 def login(user: UserLoginSchema):
     hashed_password = bcrypt.hashpw(
         user.password.encode("utf-8"),
-        b"$2b$12$76p17W.S2Ic6vBqXpE.8p."
+        BCRYPT_SALT
     ).decode("utf-8")
 
     check_ex = check_exists(user.email, hashed_password)

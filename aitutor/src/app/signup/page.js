@@ -13,7 +13,7 @@ const Page = () => {
 
   const handleSumit = async (e)=>{
     e.preventDefault();
-    const response = await fetch("http://localhost:8000/signup", {
+    const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/signup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

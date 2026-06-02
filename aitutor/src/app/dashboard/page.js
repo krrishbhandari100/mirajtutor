@@ -10,7 +10,7 @@ const Page = () => {
     const [deleteConfirm, setDeleteConfirm] = useState(null)
 
     const handleCreateRoom = async (roomData) => {
-        let res = await fetch("http://localhost:8000/add_rooms", {
+        let res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/add_rooms`, {
             method: 'POST',
             headers: {
             'Content-Type': 'application/json',
@@ -28,7 +28,7 @@ const Page = () => {
 
     const handleDeleteRoom = async (roomId) => {
         let token = localStorage.getItem('token');
-        let res = await fetch("http://localhost:8000/delete_room", {
+        let res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/delete_room`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ token, room_id: roomId })
@@ -43,7 +43,7 @@ const Page = () => {
     useEffect(()=>{
         let token = localStorage.getItem('token');
         if(token){
-            fetch(`http://localhost:8000/fetch_rooms?token=${token}`, {
+            fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/fetch_rooms?token=${token}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

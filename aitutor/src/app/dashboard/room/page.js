@@ -106,7 +106,7 @@ const Page = () => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('sid', socket.id || '');
-      const res = await fetch('http://localhost:8000/upload_doc', {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/upload_doc`, {
         method: 'POST',
         body: formData,
       });
@@ -155,9 +155,6 @@ const Page = () => {
       if (avatar.audio) {
         try { avatar.audio.pause(); avatar.audio.currentTime = 0; } catch { }
       }
-      if (avatar.audioCtx && avatar.audioCtx.state === 'running') {
-        await avatar.audioCtx.suspend();
-      }
     } catch (error) {
       console.error('Error stopping tutor speech:', error);
     } finally {
@@ -205,11 +202,9 @@ const Page = () => {
       }
 
       // Check if interrupted while board was drawing
-      if (interruptedRef.current || sessionStoppedRef.current) {
-        interruptedRef.current = false;
+      if (sessionStoppedRef.current) {
         setStatusText('Session active');
         isProcessingRef.current = false;
-        processNextItem();
         return;
       }
 
@@ -244,14 +239,11 @@ const Page = () => {
         wdurations: data.wdurations || [],
       };
 
-      // Check if interrupted while decoding
-      if (interruptedRef.current || sessionStoppedRef.current) {
-        console.log('🔇 Skipping audio — student interrupted during decode');
-        interruptedRef.current = false;
+      // Check if session stopped while decoding
+      if (sessionStoppedRef.current) {
         setTutorSpeaking(false);
         setStatusText('Session active');
         isProcessingRef.current = false;
-        processNextItem();
         return;
       }
 
@@ -270,6 +262,12 @@ const Page = () => {
       if (!sessionStoppedRef.current) setStatusText('Session active');
     } finally {
       isProcessingRef.current = false;
+      if (interruptedRef.current) {
+        interruptedRef.current = false;
+        setTutorSpeaking(false);
+        if (!sessionStoppedRef.current) setStatusText('Session active');
+        return;
+      }
       if (itemQueueRef.current.length === 0 && interruptedQueueBackupRef.current.length > 0) {
         resumeInterruptedTeaching();
         return;
@@ -281,7 +279,7 @@ const Page = () => {
   const resumeInterruptedTeaching = async () => {
     try {
       setStatusText('Continuing...');
-      const res = await fetch('http://localhost:8000/tts', {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: 'Now, continuing with what I was explaining earlier.' }),
@@ -435,8 +433,8 @@ const Page = () => {
       // Phase C: AI Guard (Interruptible)
       // Once interrupted, threshold drops back to normal.
       if (isTutorSpeakingRef.current) {
-        const INTERRUPT_MULTIPLIER = 0.5;
-        const interruptThreshold = Math.max(noiseFloorRef.current * INTERRUPT_MULTIPLIER, 15);
+        const INTERRUPT_MULTIPLIER = 0.85;
+        const interruptThreshold = Math.max(noiseFloorRef.current * INTERRUPT_MULTIPLIER, 20);
         console.log("My Vol", volume);
         console.log("interruptThreshold", interruptThreshold);
         if (volume > interruptThreshold) {
@@ -643,7 +641,7 @@ const Page = () => {
     const fetchRoomInfo = async () => {
       if (!roomId) return;
       try {
-        const res = await fetch(`http://localhost:8000/get_room_info?room_id=${roomId}`, {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/get_room_info?room_id=${roomId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         });
@@ -797,20 +795,21 @@ const Page = () => {
               </button>
               <span className="w-px h-4 bg-white/20 mx-1" />
               <button
-                onClick={() => {
+                onClick={async () => {
                   const board = boardRef.current;
                   if (!board?.saveAllPages) return;
                   const pages = board.saveAllPages();
                   if (!pages || pages.length === 0) return;
-                  pages.forEach((dataURL, i) => {
-                    const link = document.createElement('a');
-                    link.download = `board-page-${i + 1}.png`;
-                    link.href = dataURL;
-                    link.click();
+                  const { jsPDF } = await import('jspdf');
+                  const pdf = new jsPDF('l', 'mm', [297, 210]);
+                  pages.forEach((dataUrl, i) => {
+                    if (i > 0) pdf.addPage([297, 210]);
+                    pdf.addImage(dataUrl, 'PNG', 10, 10, 277, 190);
                   });
+                  pdf.save('board.pdf');
                 }}
                 className="text-xs hover:text-indigo-300 transition-colors"
-                title="Save all board pages"
+                title="Save all board pages as PDF"
               >
                 💾
               </button>

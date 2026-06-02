@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "jspdf": "^4.2.1",
     "jwt-decode": "^4.0.0",
     "next": "16.1.6",
     "opentype.js": "^2.0.0",
