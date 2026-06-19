@@ -49,7 +49,7 @@ const Page = () => {
   const noiseFloorRef = useRef(0);
   const calibrationFramesRef = useRef(0);
   const CALIBRATION_FRAMES = 45; // Wait ~1.5 seconds to measure room silence
-  const NOISE_MULTIPLIER = 1.2;  // You must speak 20% louder than the room to trigger the mic
+  const NOISE_MULTIPLIER = 1.15; // Must speak 15% louder than room to trigger
 
   // AI Guard Rails
   const isTutorSpeakingRef = useRef(false); // Mutes the mic when the AI talks (prevents echoes)
@@ -63,6 +63,7 @@ const Page = () => {
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isTutorReady, setIsTutorReady] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
+  const [isLoadingRoom, setIsLoadingRoom] = useState(true);
   const [roomInfo, setRoomInfo] = useState({ subject: '', topic: '', prevCtx: '' });
 
   const [isMuted, setIsMuted] = useState(true);
@@ -72,10 +73,34 @@ const Page = () => {
   const docInfoRef = useRef(null);
   const [isUploading, setIsUploading] = useState(false);
 
-  const [boardCurrentPage, setBoardCurrentPage] = useState(1);
-  const [boardTotalPages, setBoardTotalPages] = useState(1);
-  const boardCurrentPageRef = useRef(1);
-  const boardTotalPagesRef = useRef(1);
+  const [boardCurrentPage, setBoardCurrentPage] = useState(0);
+  const [boardTotalPages, setBoardTotalPages] = useState(0);
+  const boardCurrentPageRef = useRef(0);
+  const boardTotalPagesRef = useRef(0);
+
+  // Language settings
+  const [speakingLang, setSpeakingLang] = useState('en');
+  const [writingLang, setWritingLang] = useState('en');
+  const LANG_OPTIONS = [
+    { value: 'en', label: 'English' },
+    { value: 'hi', label: 'Hindi' },
+    { value: 'bn', label: 'Bengali' },
+    { value: 'gu', label: 'Gujarati' },
+    { value: 'kn', label: 'Kannada' },
+    { value: 'ml', label: 'Malayalam' },
+    { value: 'mr', label: 'Marathi' },
+    { value: 'ne', label: 'Nepali' },
+    { value: 'ta', label: 'Tamil' },
+    { value: 'te', label: 'Telugu' },
+    { value: 'ur', label: 'Urdu' },
+  ];
+
+  // Send language preference to backend and get welcome message in that language
+  useEffect(() => {
+    if (socket.connected) {
+      socket.emit('user_language', { lang: speakingLang });
+    }
+  }, [speakingLang]);
 
   // Sequential chunk queue for AI replies
   const itemQueueRef = useRef([]);
@@ -398,20 +423,24 @@ const Page = () => {
       // Look at the current volume of the room
       analyserRef.current.getByteFrequencyData(dataArray);
 
-      // Only average the volume of human speech frequencies (ignores fans/hissing)
+      // Measure RMS energy of human speech frequencies (ignores fans/hissing)
       const speechBins = dataArray.slice(speechLowBin, speechHighBin);
-      const volume = speechBins.reduce((sum, v) => sum + v, 0) / speechBins.length;
+      const rms = Math.sqrt(speechBins.reduce((sum, v) => sum + v * v, 0) / speechBins.length);
 
-      // Phase A: Calibration (First 1.5 seconds)
-      // Learn how loud the room naturally is.
+      // Phase A: Learn noise floor via exponential moving average
+      // Smoothly adapts to room noise — a single loud spike barely moves it.
       if (calibrationFramesRef.current < CALIBRATION_FRAMES) {
-        if (volume > noiseFloorRef.current) noiseFloorRef.current = volume;
+        noiseFloorRef.current = noiseFloorRef.current * 0.9 + rms * 0.1;
         calibrationFramesRef.current++;
         animationFrameRef.current = requestAnimationFrame(detectSpeech);
         return;
       }
+      // Only update noise floor when tutor is NOT speaking — locks baseline during AI playback
+      if (!isTutorSpeakingRef.current) {
+        noiseFloorRef.current = noiseFloorRef.current * 0.99 + rms * 0.01;
+      }
 
-      // Calculate the final target to beat (40% louder than background noise)
+      // Calculate the final target to beat (15% louder than background noise)
       const threshold = Math.max(noiseFloorRef.current * NOISE_MULTIPLIER, 8);
 
       // Phase B: Mute Guard
@@ -433,11 +462,10 @@ const Page = () => {
       // Phase C: AI Guard (Interruptible)
       // Once interrupted, threshold drops back to normal.
       if (isTutorSpeakingRef.current) {
-        const INTERRUPT_MULTIPLIER = 0.85;
-        const interruptThreshold = Math.max(noiseFloorRef.current * INTERRUPT_MULTIPLIER, 20);
-        console.log("My Vol", volume);
+        const interruptThreshold = noiseFloorRef.current;
+        console.log("My RMS", rms);
         console.log("interruptThreshold", interruptThreshold);
-        if (volume > interruptThreshold) {
+        if (rms > interruptThreshold) {
           // Student interrupted! Stop tutor immediately
           interruptedQueueBackupRef.current = itemQueueRef.current.splice(0);
           isProcessingRef.current = false;
@@ -470,9 +498,9 @@ const Page = () => {
       }
 
       // Phase C: Listening!
-      if (volume > threshold) {
+      if (rms > threshold) {
         // Student is speaking loud enough!
-        console.log("The volume is", volume);
+        console.log("The rms is", rms);
         if (!isSpeakingRef.current) {
           isSpeakingRef.current = true;
           setStatusText('Listening...');
@@ -501,7 +529,7 @@ const Page = () => {
           setStatusText('Processing...');
           socket.emit('speech_ended'); // Send the audio to Whisper!
           silenceTimeoutRef.current = null;
-        }, 800);
+        }, 700);
       }
 
       // Loop forever
@@ -527,6 +555,7 @@ const Page = () => {
       setStatusText('Starting session...');
 
       if (!socket.connected) socket.connect();
+      socket.emit('user_language', { lang: speakingLang });
 
       // Ask user for Mic Permissions
       const micStream = await navigator.mediaDevices.getUserMedia({
@@ -547,6 +576,8 @@ const Page = () => {
         prevCtx: roomInfo.prevCtx,
         boardCurrentPage: 1,
         boardTotalPages: 1,
+        speaking_lang: speakingLang,
+        writing_lang: writingLang,
       };
       if (socket.connected) {
         socket.emit('session_context', contextPayload);
@@ -640,6 +671,7 @@ const Page = () => {
   useEffect(() => {
     const fetchRoomInfo = async () => {
       if (!roomId) return;
+      setIsLoadingRoom(true);
       try {
         const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/get_room_info?room_id=${roomId}`, {
           method: 'POST',
@@ -653,6 +685,8 @@ const Page = () => {
         });
       } catch (error) {
         console.error('Error fetching room info:', error);
+      } finally {
+        setIsLoadingRoom(false);
       }
     };
     fetchRoomInfo();
@@ -728,7 +762,7 @@ const Page = () => {
 
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden text-slate-900">
-      <header className="p-4 bg-white flex justify-between items-center border-b border-slate-200 shadow-sm">
+      <header className="p-4 bg-white flex flex-wrap gap-2 justify-between items-center border-b border-slate-200 shadow-sm">
         <div className="flex items-center gap-3">
           <div className={`w-3 h-3 rounded-full ${isSessionActive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
           <h1 className="font-bold text-lg text-slate-800">
@@ -741,23 +775,52 @@ const Page = () => {
             'bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100'
           }`}>
             {isUploading ? '⏳ Uploading...' : docInfo ? `📄 ${docInfo.filename}` : '📄 Upload Material'}
-            <input type="file" accept=".pdf,.pptx,.ppt,.docx,.doc" onChange={handleUploadDoc} className="hidden" disabled={isUploading} />
+            <input type="file" accept=".pdf" onChange={handleUploadDoc} className="hidden" disabled={isUploading} />
           </label>
+          {isUploading && (
+            <div className="w-20 h-1 bg-slate-200 rounded-full overflow-hidden">
+              <div className="h-full bg-indigo-500 rounded-full animate-upload-bar" />
+            </div>
+          )}
           {docInfo && (
             <button onClick={() => { setDocInfo(null); }} className="text-xs text-red-400 hover:text-red-600 transition-colors" title="Remove document">
               ✕
             </button>
           )}
         </div>
-        <div className="px-4 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold uppercase tracking-widest border border-indigo-100">
-          {statusText}
-        </div>
+        {!isSessionActive && (
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Speak</span>
+              <select value={speakingLang} onChange={(e) => setSpeakingLang(e.target.value)}
+                className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300">
+                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Write</span>
+              <select value={writingLang} onChange={(e) => setWritingLang(e.target.value)}
+                className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300">
+                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+        {isLoadingRoom ? (
+          <div className="px-4 py-1 rounded-full animate-pulse">
+            <div className="h-3 w-24 bg-slate-200 rounded-full" />
+          </div>
+        ) : (
+          <div className="px-4 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold uppercase tracking-widest border border-indigo-100">
+            {statusText}
+          </div>
+        )}
       </header>
 
-      <main className="flex-1 relative p-6 flex gap-6 overflow-auto">
-        <div className="flex-1 bg-white rounded-[2.5rem] border border-slate-200 relative overflow-hidden shadow-xl">
-          <div className="absolute top-6 left-6 z-10 bg-white/80 backdrop-blur-md px-4 py-2 rounded-2xl border border-slate-100 shadow-sm">
-            <p className="text-sm font-bold text-slate-700 flex items-center gap-2">
+      <main className="flex-1 relative p-2 sm:p-4 md:p-6 flex flex-col overflow-hidden">
+        <div className="flex-1 bg-white rounded-xl sm:rounded-2xl md:rounded-[2.5rem] border border-slate-200 relative overflow-hidden shadow-xl">
+          <div className="absolute top-2 left-2 sm:top-4 sm:left-4 md:top-6 md:left-6 z-10 bg-white/80 backdrop-blur-md px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 rounded-lg sm:rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <p className="text-xs sm:text-sm font-bold text-slate-700 flex items-center gap-1 sm:gap-2">
               <span className="text-indigo-600">●</span> AI Tutor
             </p>
           </div>
@@ -769,7 +832,7 @@ const Page = () => {
                 updateBoardPageState();
               }}
             />
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 bg-black/50 backdrop-blur-sm rounded-full px-4 py-2 text-white text-sm">
+            <div className="absolute bottom-4 right-4 z-20 flex items-center gap-2 sm:gap-3 bg-black/50 backdrop-blur-sm rounded-full px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 text-white text-xs sm:text-sm">
               <button
                 onClick={() => {
                   boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
@@ -815,10 +878,15 @@ const Page = () => {
               </button>
             </div>
           </div>
-        </div>
-
-        <div className="w-80 flex flex-col">
-          <div className="flex-1 relative rounded-[2rem] overflow-hidden shadow-2xl">
+          <div className="absolute bottom-14 sm:bottom-12 md:bottom-10 left-1/2 -translate-x-1/2 z-30 w-24 h-36 sm:w-36 sm:h-48 md:w-44 md:h-56 lg:w-56 lg:h-72 rounded-xl sm:rounded-2xl md:rounded-[2rem] overflow-hidden shadow-2xl">
+            {!isTutorReady && (
+              <div className="absolute inset-0 z-10 bg-slate-900/70 flex items-center justify-center rounded-[2rem]">
+                <div className="text-center">
+                  <div className="w-12 h-12 border-4 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-white text-sm font-medium">Loading avatar...</p>
+                </div>
+              </div>
+            )}
             <TalkingTutor
               avatarPath="/avatars/female-avatar4.glb"
               onReady={handleAvatarReady}
@@ -827,14 +895,14 @@ const Page = () => {
         </div>
       </main>
 
-      <footer className="p-6 bg-white border-t border-slate-200">
+      <footer className="p-3 sm:p-4 md:p-6 bg-white border-t border-slate-200">
         <div className="flex justify-center items-center gap-4">
           <button
             onClick={toggleMute}
             disabled={!isSessionActive}
             title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
             className={`
-              p-4 rounded-full font-bold text-lg transition-all shadow-lg
+              p-2 sm:p-3 md:p-4 rounded-full font-bold text-xs sm:text-sm md:text-lg transition-all shadow-lg
               ${!isSessionActive ? 'opacity-30 cursor-not-allowed' : 'hover:scale-105'}
               ${isMuted ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}
             `}
@@ -845,7 +913,7 @@ const Page = () => {
             onClick={handleSessionToggle}
             disabled={!isTutorReady && !isSessionActive}
             className={`
-              px-8 py-4 rounded-full font-bold text-lg transition-all shadow-lg
+              px-4 py-2 sm:px-6 sm:py-3 md:px-8 md:py-4 rounded-full font-bold text-xs sm:text-sm md:text-lg transition-all shadow-lg
               ${!isTutorReady && !isSessionActive ? 'opacity-50 cursor-not-allowed' : ''}
               ${isSessionActive ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}
             `}

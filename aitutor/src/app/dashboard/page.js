@@ -4,10 +4,26 @@ import CreateRoomModal from './RoomAddModel';
 import Link from 'next/link';
 
 
+function SkeletonCard() {
+  return (
+    <div className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm animate-pulse">
+      <div className="h-14 w-14 bg-slate-200 rounded-2xl mb-6" />
+      <div className="h-5 bg-slate-200 rounded-full w-3/4 mb-3" />
+      <div className="h-4 bg-slate-100 rounded-full w-1/2 mb-6" />
+      <div className="flex items-center justify-between pt-6 border-t border-slate-50">
+        <div className="h-3 bg-slate-100 rounded-full w-24" />
+        <div className="h-3 bg-slate-100 rounded-full w-12" />
+      </div>
+    </div>
+  );
+}
+
+
 const Page = () => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [rooms, setRooms] = useState([]);
     const [deleteConfirm, setDeleteConfirm] = useState(null)
+    const [isLoading, setIsLoading] = useState(true);
 
     const handleCreateRoom = async (roomData) => {
         let res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/add_rooms`, {
@@ -41,21 +57,32 @@ const Page = () => {
     };
 
     useEffect(()=>{
-        let token = localStorage.getItem('token');
-        if(token){
-            fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/fetch_rooms?token=${token}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            }).then(res=>{
-                return res.json();
-            }).then(data =>{
-                setRooms(data['allRooms']);
-                console.log("Data yaha hai", data['allRooms']);
-            });
-            
+        let cancelled = false;
+        const token = localStorage.getItem('token');
+        if (!token) {
+            const id = setTimeout(() => {
+                if (!cancelled) setIsLoading(false);
+            }, 50);
+            return () => { cancelled = true; clearTimeout(id); };
         }
+
+        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/fetch_rooms?token=${token}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        }).then(res => res.json())
+        .then(data => {
+            if (!cancelled) {
+                setRooms(data['allRooms']);
+                setIsLoading(false);
+            }
+            console.log("Data yaha hai", data['allRooms']);
+        }).catch(() => {
+            if (!cancelled) setIsLoading(false);
+        });
+
+        return () => { cancelled = true; };
     }, [])
 
     return (
@@ -102,11 +129,32 @@ const Page = () => {
                 </div>
 
                 {/* 3. THE ROOM GRID */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-8">
+                {isLoading ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-8">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <SkeletonCard key={i} />
+                    ))}
+                  </div>
+                ) : rooms.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-24 text-center">
+                    <div className="h-20 w-20 bg-slate-100 rounded-full flex items-center justify-center mb-6">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor" className="w-10 h-10 text-slate-300">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+                      </svg>
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-900 mb-2">No rooms yet</h3>
+                    <p className="text-slate-500 text-sm mb-6">Create your first room to start learning with AI.</p>
+                    <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all">
+                      + Create Your First Room
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-8">
                     {rooms.map((room, index) => (
                         <RoomCard key={index} room={room} onDelete={() => setDeleteConfirm(room)} />
                     ))}
-                </div>
+                  </div>
+                )}
 
                 {deleteConfirm && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">

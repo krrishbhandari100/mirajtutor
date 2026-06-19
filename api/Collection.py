@@ -1,4 +1,6 @@
-from sqlmodel import Field, SQLModel, create_engine, Session, select, text
+from sqlmodel import Field, SQLModel
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy import select, event
 import uuid
 import jwt
 from os import environ
@@ -7,7 +9,12 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent / '.env')
 
-JWT_SECRET = environ.get('JWT_SECRET', '2f5ca9b6ff3f7dbf2dff679d9d8e5fd1d0dc9c2e447fbc8847041ce04b67b8d9b7de61eb11857cf13363b277a580e4a9a2d2')
+JWT_SECRET = environ.get('JWT_SECRET')
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET environment variable is not set. "
+        "Copy api/.env.example to api/.env and set a secure random value."
+    )
 JWT_ALGO = environ.get('JWT_ALGO', 'HS256')
 
 
@@ -23,22 +30,27 @@ class Room(SQLModel, table=True):
     roomId: str | None = Field(default=None, primary_key=True)
     userId: int | None = Field(default=None, foreign_key="user.userId", ondelete="SET NULL")
     roomname: str
-    topic: str = Field(default=None)    # Canonical room field (alias for previous subject)
-    prompt: str = Field(default=None)   # AI tutor instructions
+    topic: str = Field(default=None)
+    prompt: str = Field(default=None)
 
 
-sqlite_url = "sqlite:///aiTutordb.db"
-engine = create_engine(sqlite_url, echo=True)
-
-SQLModel.metadata.create_all(engine)
-
-with engine.connect() as connection:
-    connection.execute(text("PRAGMA foreign_keys=ON"))  # SQLite only
-
-    # Note: subject field has been removed; topic is the canonical field
+sqlite_url = "sqlite+aiosqlite:///aiTutordb.db"
+engine = create_async_engine(sqlite_url, echo=True)
 
 
-def add_user(first_name: str, last_name: str, email: str, password: str):
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+
+async def add_user(first_name: str, last_name: str, email: str, password: str):
     myUser = User(
         userId=uuid.uuid4().hex,
         first_name=first_name,
@@ -46,38 +58,36 @@ def add_user(first_name: str, last_name: str, email: str, password: str):
         email=email,
         password=password,
     )
-    session = Session(engine)
-    try:
-        session.add(myUser)
-        session.commit()
-        session.refresh(myUser)
-        return {"msg": "Success", "status": "success"}
-    except Exception:
-        return {"msg": "Some problem while signing up", "status": "error"}
+    async with AsyncSession(engine) as session:
+        try:
+            session.add(myUser)
+            await session.commit()
+            await session.refresh(myUser)
+            return {"msg": "Success", "status": "success"}
+        except Exception:
+            return {"msg": "Some problem while signing up", "status": "error"}
 
 
-def check_exists(email: str, password: str = ""):
-    with Session(engine) as session:
+async def check_exists(email: str, password: str = ""):
+    async with AsyncSession(engine) as session:
         statement = select(User).where(User.email == email).where(User.password == password)
-        results = session.exec(statement).all()
-        res = []
-        # print(results)
-        if len(results) == 1:
-            for user in results:
-                res.append(user)
-            return True, res
-        for user in results:
-            res.append(user)
-        return False, res
+        results = await session.execute(statement)
+        users = results.scalars().all()
+        if len(users) == 1:
+            return True, list(users)
+        return False, list(users)
 
 
-def add_room(token: str, prompt: str, roomname: str, topic: str):
-    with Session(engine) as session:
-        room_id = uuid.uuid4().hex
-        decoded_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+async def add_room(token: str, prompt: str, roomname: str, topic: str):
+    room_id = uuid.uuid4().hex
+    decoded_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+    async with AsyncSession(engine) as session:
         statement = select(User).where(User.email == decoded_payload['email'])
-        results = session.exec(statement).all()
-        userId = results[0].userId
+        results = await session.execute(statement)
+        user = results.scalars().first()
+        if not user:
+            return {"msg": "User not found", "status": "error"}
+        userId = user.userId
 
         print("The user id is", userId)
 
@@ -89,35 +99,35 @@ def add_room(token: str, prompt: str, roomname: str, topic: str):
             topic=topic,
         )
 
-        # Open a fresh session for the write operation
-        with Session(engine) as write_session:
-            try:
-                write_session.add(myRoom)
-                write_session.commit()
-                write_session.refresh(myRoom)
-                return {"msg": "Success", "status": "success", "room_id": room_id}
-            except Exception as e:
-                return {"msg": "Some problem while adding room", "status": str(e)}
+        try:
+            session.add(myRoom)
+            await session.commit()
+            await session.refresh(myRoom)
+            return {"msg": "Success", "status": "success", "room_id": room_id}
+        except Exception as e:
+            return {"msg": "Some problem while adding room", "status": str(e)}
 
 
-def get_rooms(token: str = None, userId: str = None):
-    with Session(engine) as session:
+async def get_rooms(token: str = None, userId: str = None):
+    async with AsyncSession(engine) as session:
         fetched_userId = None
 
         if token:
             decoded_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
             statement = select(User).where(User.email == decoded_payload['email'])
-            results = session.exec(statement).all()
-            print("The results are", results)
-            if len(results) > 0:
-                fetched_userId = results[0].userId
+            results = await session.execute(statement)
+            users = results.scalars().all()
+            print("The results are", users)
+            if users:
+                fetched_userId = users[0].userId
         elif userId:
             fetched_userId = userId
 
         statement = select(Room).where(Room.userId == fetched_userId)
-        results = session.exec(statement)
+        results = await session.execute(statement)
+        rooms = results.scalars().all()
         records = []
-        for room in results:
+        for room in rooms:
             records.append({
                 "roomId": room.roomId,
                 "roomname": room.roomname,
@@ -128,29 +138,31 @@ def get_rooms(token: str = None, userId: str = None):
         return records
 
 
-def delete_room(token: str, room_id: str):
-    with Session(engine) as session:
+async def delete_room(token: str, room_id: str):
+    async with AsyncSession(engine) as session:
         decoded_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
         statement = select(User).where(User.email == decoded_payload['email'])
-        results = session.exec(statement).all()
-        if not results:
+        results = await session.execute(statement)
+        user = results.scalars().first()
+        if not user:
             return {"status": "error", "msg": "User not found"}
-        userId = results[0].userId
+        userId = user.userId
 
         room_statement = select(Room).where(Room.roomId == room_id, Room.userId == userId)
-        room = session.exec(room_statement).first()
+        results = await session.execute(room_statement)
+        room = results.scalars().first()
         if not room:
             return {"status": "error", "msg": "Room not found or unauthorized"}
-        session.delete(room)
-        session.commit()
+        await session.delete(room)
+        await session.commit()
         return {"status": "success", "msg": "Room deleted"}
 
 
-def get_rooms_by_id(id: str):
-    with Session(engine) as session:
+async def get_rooms_by_id(id: str):
+    async with AsyncSession(engine) as session:
         statement = select(Room).where(Room.roomId == id)
-        results = session.exec(statement)
-        room_obj = results.first()
+        results = await session.execute(statement)
+        room_obj = results.scalars().first()
 
         if room_obj is not None:
             return {
