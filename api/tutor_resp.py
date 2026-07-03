@@ -1,14 +1,7 @@
 from ollama import chat
 
-def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
-                            board_context="", document_images=None,
-                            is_continuation=False, speaking_lang="en", writing_lang="en"):
-    if document_images is None:
-        document_images = []
-
-    board_context_str = f'CURRENT BOARD STATE: {board_context}' if board_context else ''
-
-    prompt_for_tutor = f"""
+def _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_context_str):
+    return f"""
     You are an expert teacher on "{topic}". Call yourself ma'am. If called sir, tease gently.
 
     LANGUAGE SETTINGS:
@@ -23,11 +16,15 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     Warm, patient, excited. Break hard things into simple pieces. Ask questions, check understanding. Celebrate small wins. Say "Good question!" often.
 
     Response MUST be valid JSON with this EXACT structure:
-    {{"speakingresponse": "...", "boardresponse": {{"action": "newpage|draw", "commands": [...]}}, "has_more": true|false}}
+    {{"speakingresponse": "...", "boardresponse": {{"action": "newpage|draw|gotopage|erasepage", "commands": [...]}}, "has_more": true|false, "discardQueue": true|false}}
+
+    IMPORTANT: In the "speakingresponse" value, do NOT use double quotes (") inside the text. Use 「corner brackets」 instead if you need to quote something.
+    Keep speakingresponse to a single paragraph. No newlines inside the string.
 
     Output exactly 1 chunk per response.
     - "has_more": true if you still have more to teach, false if this is your final chunk.
-     - "draw" is the default — adds to the current page. Use "newpage" only when the board is full (~6-8 items) or starting a new subtopic.
+    - "discardQueue": true if the student changed topic entirely or asked something unrelated to what you were teaching. false if it's a doubt about current teaching (the new response goes first, then resume previous content).
+    - "draw" is the default — adds to the current page. Use "newpage" only when the board is full (~6-8 items) or starting a new subtopic.
     - 3-6 commands max. No "time" field.
 
     INSTRUCTIONS:
@@ -38,6 +35,7 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     - NO markdown: no *, **, _, #, `, →, ⇒, • — voice system reads them aloud.
     - Celebrate: "Exactly!", "You got it!", "Great question!"
     - If confused: re-explain with a different analogy.
+    - Do NOT use " (double quotes) inside the speaking text. Use corner brackets 「」 instead.
 
     TEACHING ARC (follow this order):
     1. HOOK — surprising question or real-world problem (1-2 sentences)
@@ -117,8 +115,19 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     SYNCHRONIZATION: Automatic — each chunk's board appears when its speech plays. No timing needed.
 
     OUTPUT: Return ONLY valid JSON. No markdown fences. No text before/after.
-    Example: {{"speakingresponse":"Welcome!","boardresponse":{{"action":"newpage","commands":[{{"type":"header","x":200,"y":60,"content":"TITLE","size":40,"color":"#FFD700"}}]}},"has_more":false}}
+    Example: {{"speakingresponse":"Welcome!","boardresponse":{{"action":"newpage","commands":[{{"type":"header","x":200,"y":60,"content":"TITLE","size":40,"color":"#FFD700"}}]}},"has_more":false,"discardQueue":false}}
     """
+
+
+def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
+                            board_context="", document_images=None,
+                            is_continuation=False, speaking_lang="en", writing_lang="en"):
+    if document_images is None:
+        document_images = []
+
+    board_context_str = f'CURRENT BOARD STATE: {board_context}' if board_context else ''
+
+    prompt_for_tutor = _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_context_str)
 
     messages = [
         {"role": "system", "content": prompt_for_tutor},
@@ -126,7 +135,7 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     ]
 
     if is_continuation:
-        user_msg = {"role": "user", "content": "Continue your teaching with one chunk. Output ONLY valid JSON matching the exact schema above. No markdown fences. No extra text. {\"speakingresponse\":\"...\",\"boardresponse\":{\"action\":\"draw\",\"commands\":[...]},\"has_more\":false}"}
+        user_msg = {"role": "user", "content": "Continue your teaching with one chunk. Output ONLY valid JSON matching the exact schema above. No markdown fences. No extra text. {\"speakingresponse\":\"...\",\"boardresponse\":{\"action\":\"draw\",\"commands\":[...]},\"has_more\":false,\"discardQueue\":false}"}
     else:
         user_msg = {"role": "user", "content": msg}
     if document_images:
@@ -134,7 +143,7 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     messages.append(user_msg)
 
     response = chat(
-        model="minimax-m3:cloud",
+        model="ministral-3:14b-cloud",
         messages=messages,
     )
 
@@ -145,3 +154,28 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
             return str(response)
         except Exception:
             return ''
+
+
+def generate_tutor_response_stream(subject, topic, system_prompt, chat_history, msg,
+                                    board_context="", document_images=None,
+                                    speaking_lang="en", writing_lang="en"):
+    if document_images is None:
+        document_images = []
+
+    board_context_str = f'CURRENT BOARD STATE: {board_context}' if board_context else ''
+
+    prompt_for_tutor = _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_context_str)
+
+    messages = [
+        {"role": "system", "content": prompt_for_tutor},
+        *chat_history,
+    ]
+
+    user_msg = {"role": "user", "content": msg}
+    if document_images:
+        user_msg["images"] = document_images
+    messages.append(user_msg)
+
+    stream = chat(model="ministral-3:14b-cloud", messages=messages, stream=True)
+    for chunk in stream:
+        yield chunk['message']['content']

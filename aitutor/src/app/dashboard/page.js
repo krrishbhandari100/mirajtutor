@@ -6,13 +6,13 @@ import Link from 'next/link';
 
 function SkeletonCard() {
   return (
-    <div className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm animate-pulse">
-      <div className="h-14 w-14 bg-slate-200 rounded-2xl mb-6" />
-      <div className="h-5 bg-slate-200 rounded-full w-3/4 mb-3" />
-      <div className="h-4 bg-slate-100 rounded-full w-1/2 mb-6" />
-      <div className="flex items-center justify-between pt-6 border-t border-slate-50">
-        <div className="h-3 bg-slate-100 rounded-full w-24" />
-        <div className="h-3 bg-slate-100 rounded-full w-12" />
+    <div className="backdrop-blur-2xl bg-white/[0.02] p-8 rounded-[2rem] border border-white/[0.04] animate-pulse">
+      <div className="h-14 w-14 bg-white/[0.04] rounded-2xl mb-6" />
+      <div className="h-5 bg-white/[0.04] rounded-full w-3/4 mb-3" />
+      <div className="h-4 bg-white/[0.02] rounded-full w-1/2 mb-6" />
+      <div className="flex items-center justify-between pt-6 border-t border-white/[0.03]">
+        <div className="h-3 bg-white/[0.02] rounded-full w-24" />
+        <div className="h-3 bg-white/[0.02] rounded-full w-12" />
       </div>
     </div>
   );
@@ -86,49 +86,44 @@ const Page = () => {
     }, [])
 
     return (
-        // min-h-screen ensures the background covers the whole page
-        // pt-16 is CRITICAL so the content starts below your h-16 Header
-        <div className="min-h-screen bg-slate-50 pt-16 flex">
+        <div className="min-h-screen bg-[#0A0A0F] pt-16 flex">
 
-            {/* 1. SIDEBAR: Matching your Indigo-600 Branding */}
-            <aside className="w-64 bg-white border-r border-slate-200 hidden md:flex flex-col fixed h-[calc(100vh-64px)]">
+            {/* SIDEBAR */}
+            <aside className="w-64 bg-[#0A0A0F] border-r border-white/[0.03] hidden md:flex flex-col fixed h-[calc(100vh-64px)]">
                 <div className="p-6 flex flex-col h-full">
                     <nav className="space-y-1 flex-1">
-                        <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Workspace</h2>
+                        <h2 className="text-[10px] font-bold text-amber-200/40 uppercase tracking-widest mb-4">Workspace</h2>
 
-                        <button className="w-full flex items-center gap-3 px-4 py-3 bg-indigo-50 text-indigo-700 rounded-2xl font-bold border border-indigo-100">
+                        <button className="w-full flex items-center gap-3 px-4 py-3 bg-amber-400/10 text-amber-300 rounded-2xl font-bold border border-amber-400/15">
                             <span className="text-lg">📁</span> My Rooms
                         </button>
 
-                        <button className="w-full flex items-center gap-3 px-4 py-3 text-slate-600 hover:bg-slate-50 rounded-2xl transition-all">
+                        <button className="w-full flex items-center gap-3 px-4 py-3 text-amber-200/40 hover:bg-white/[0.02] rounded-2xl transition-all">
                             <span className="text-lg">📈</span> Progress
                         </button>
                     </nav>
 
-                    {/* Bottom Sidebar Action */}
-                    <div className="mt-auto p-4 bg-indigo-600 rounded-2xl text-white shadow-lg shadow-indigo-100">
+                    <div className="mt-auto p-4 bg-gradient-to-br from-amber-400/20 to-amber-600/20 rounded-2xl text-amber-100 border border-amber-400/10">
                         <p className="text-xs font-medium opacity-80">Pro Plan</p>
                         <p className="text-sm font-bold">Unlimited PDFs</p>
                     </div>
                 </div>
             </aside>
 
-            {/* 2. MAIN CONTENT AREA */}
+            {/* MAIN CONTENT */}
             <main className="flex-1 md:ml-64 p-6 md:p-10">
 
-                {/* Welcome Section */}
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
                     <div>
-                        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Dashboard</h1>
-                        <p className="text-slate-500 mt-1">Select a room to start learning with MirajTutor.</p>
+                        <h1 className="text-3xl font-extrabold text-amber-100 tracking-tight">Dashboard</h1>
+                        <p className="text-amber-200/50 mt-1">Select a room to start learning with MirajTutor.</p>
                     </div>
 
-                    <button onClick={(e)=>{setIsModalOpen(true); console.log("Clicked");}} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold shadow-xl shadow-indigo-200 hover:bg-indigo-700 hover:-translate-y-0.5 transition-all active:scale-95 flex items-center gap-2 w-fit">
+                    <button onClick={(e)=>{setIsModalOpen(true); console.log("Clicked");}} className="bg-white text-[#0A0A0F] px-6 py-3 rounded-2xl font-bold shadow-xl shadow-amber-500/20 hover:bg-white/90 hover:-translate-y-0.5 transition-all active:scale-95 flex items-center gap-2 w-fit">
                         <span className="text-xl">+</span> Create New Room
                     </button>
                 </div>
 
-                {/* 3. THE ROOM GRID */}
                 {isLoading ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-8">
                     {Array.from({ length: 6 }).map((_, i) => (
@@ -137,14 +132,14 @@ const Page = () => {
                   </div>
                 ) : rooms.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-24 text-center">
-                    <div className="h-20 w-20 bg-slate-100 rounded-full flex items-center justify-center mb-6">
-                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor" className="w-10 h-10 text-slate-300">
+                    <div className="h-20 w-20 bg-white/[0.03] rounded-full flex items-center justify-center mb-6">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor" className="w-10 h-10 text-amber-200/20">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
                       </svg>
                     </div>
-                    <h3 className="text-xl font-bold text-slate-900 mb-2">No rooms yet</h3>
-                    <p className="text-slate-500 text-sm mb-6">Create your first room to start learning with AI.</p>
-                    <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all">
+                    <h3 className="text-xl font-bold text-amber-100 mb-2">No rooms yet</h3>
+                    <p className="text-amber-200/50 text-sm mb-6">Create your first room to start learning with AI.</p>
+                    <button onClick={() => setIsModalOpen(true)} className="bg-white text-[#0A0A0F] px-6 py-3 rounded-2xl font-bold shadow-lg shadow-amber-500/20 hover:bg-white/90 transition-all">
                       + Create Your First Room
                     </button>
                   </div>
@@ -157,15 +152,15 @@ const Page = () => {
                 )}
 
                 {deleteConfirm && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-                        <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl p-6">
-                            <h3 className="text-lg font-bold text-slate-800 mb-2">Delete Room</h3>
-                            <p className="text-slate-500 text-sm mb-6">
-                                Are you sure you want to delete <span className="font-semibold text-slate-700">{deleteConfirm.roomname}</span>? This action cannot be undone.
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0A0A0F]/80 backdrop-blur-sm p-4">
+                        <div className="w-full max-w-sm backdrop-blur-2xl bg-white/[0.02] rounded-2xl shadow-2xl p-6 border border-white/[0.04]">
+                            <h3 className="text-lg font-bold text-amber-100 mb-2">Delete Room</h3>
+                            <p className="text-amber-200/50 text-sm mb-6">
+                                Are you sure you want to delete <span className="font-semibold text-amber-200/80">{deleteConfirm.roomname}</span>? This action cannot be undone.
                             </p>
                             <div className="flex justify-end gap-3">
-                                <button onClick={() => setDeleteConfirm(null)} className="px-5 py-2.5 text-slate-600 font-medium hover:bg-slate-100 rounded-xl transition-colors">Cancel</button>
-                                <button onClick={() => handleDeleteRoom(deleteConfirm.roomId)} className="px-5 py-2.5 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-lg shadow-red-200 transition-all active:scale-95">Delete</button>
+                                <button onClick={() => setDeleteConfirm(null)} className="px-5 py-2.5 text-amber-200/60 font-medium hover:bg-white/[0.03] rounded-xl transition-colors">Cancel</button>
+                                <button onClick={() => handleDeleteRoom(deleteConfirm.roomId)} className="px-5 py-2.5 bg-red-500/80 text-white font-bold rounded-xl hover:bg-red-500/90 shadow-lg shadow-red-500/20 transition-all active:scale-95">Delete</button>
                             </div>
                         </div>
                     </div>
@@ -191,27 +186,27 @@ function RoomCard({ room, onDelete }) {
         rel="noopener noreferrer"
         className="block"
       >
-        <div className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm hover:shadow-2xl hover:shadow-indigo-100 transition-all cursor-pointer group relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-50 rounded-bl-full -mr-12 -mt-12 transition-transform group-hover:scale-110"></div>
+        <div className="backdrop-blur-2xl bg-white/[0.02] p-8 rounded-[2rem] border border-white/[0.04] hover:bg-white/[0.04] hover:border-amber-400/20 hover:shadow-2xl hover:shadow-amber-500/5 transition-all cursor-pointer group relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-24 h-24 bg-amber-400/5 rounded-bl-full -mr-12 -mt-12 transition-transform group-hover:scale-110"></div>
           
           <div className="relative">
-            <div className="h-14 w-14 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-xl font-bold shadow-lg shadow-indigo-200 mb-6">
+            <div className="h-14 w-14 bg-gradient-to-br from-amber-300 to-amber-500 rounded-2xl flex items-center justify-center text-[#0A0A0F] text-xl font-bold shadow-lg shadow-amber-500/20 mb-6">
               {room.roomname ? room.roomname[0].toUpperCase() : 'R'}
             </div>
             
-            <h3 className="text-xl font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
+            <h3 className="text-xl font-bold text-amber-100 group-hover:text-amber-200 transition-colors">
               {room.roomname}
             </h3>
-            <p className="text-sm font-medium text-slate-400 mb-6">{room.topic}</p>
+            <p className="text-sm font-medium text-amber-200/40 mb-6">{room.topic}</p>
             
-            <div className="flex items-center justify-between pt-6 border-t border-slate-50">
+            <div className="flex items-center justify-between pt-6 border-t border-white/[0.03]">
               <div className="flex items-center gap-2">
-                 <span className="flex h-2 w-2 rounded-full bg-green-500"></span>
-                 <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                 <span className="flex h-2 w-2 rounded-full bg-emerald-400/80"></span>
+                 <span className="text-[11px] font-bold text-amber-200/40 uppercase tracking-wider">
                    ID: {room.roomId.substring(0, 8)}...
                  </span>
               </div>
-              <span className="text-indigo-600 font-bold text-sm group-hover:translate-x-1 transition-transform inline-block">Open →</span>
+              <span className="text-amber-400 font-bold text-sm group-hover:translate-x-1 transition-transform inline-block">Open →</span>
             </div>
           </div>
         </div>
@@ -219,7 +214,7 @@ function RoomCard({ room, onDelete }) {
 
       <button
         onClick={(e) => { e.stopPropagation(); e.preventDefault(); onDelete(); }}
-        className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center bg-white/80 backdrop-blur-sm rounded-full border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 hover:bg-red-50 opacity-0 group-hover/card:opacity-100 transition-all shadow-sm"
+        className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center bg-white/[0.03] backdrop-blur-sm rounded-full border border-white/[0.04] text-amber-200/40 hover:text-red-400 hover:border-red-400/30 hover:bg-red-400/10 opacity-0 group-hover/card:opacity-100 transition-all shadow-sm"
         title="Delete room"
       >
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">

@@ -305,14 +305,14 @@ export default function TalkingTutor({ avatarPath, onReady }) {
     applyVisemesToModel({});
   }, [stopSpeaking]);
 
-  const speakAudio = useCallback(async (audioObject, options, callback) => {
+  const speakAudio = useCallback(async (audioObject, options, callback, skipStop = false) => {
     if (!audioObject || !audioObject.audio) {
       console.warn('No audio data provided');
       return;
     }
 
     try {
-      stopSpeaking();
+      if (!skipStop) stopSpeaking();
 
       const audioBuffer = audioObject.audio;
 

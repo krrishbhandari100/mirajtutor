@@ -1,134 +1,92 @@
-"use client"
-import { jwtDecode } from 'jwt-decode';
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import React, { useState, useEffect, useCallback } from 'react';
+'use client';
+
+import React, { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation';
 
 const Header = () => {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [user, setUser] = useState(null);
-  const pathname = usePathname();
-  const router = useRouter();
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [isMenuOpen, setIsMenuOpen] = useState(false)
+    const menuRef = useRef(null);
+    const router = useRouter();
 
-  const handleLogout = useCallback(() => {
-    localStorage.removeItem("token");
-    setUser(null);
-    router.push('/');
-  }, [router]);
+    useEffect(() => {
+        const token = localStorage.getItem('token');
+        if (token) {
+            setIsLoggedIn(true);
+        }
+    }, []);
 
-  useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setUser(null);
-      return;
-    }
-    try {
-      const decoded = jwtDecode(token);
-      if (decoded.expires < Math.floor(Date.now() / 1000)) {
-        localStorage.removeItem("token");
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (menuRef.current && !menuRef.current.contains(event.target)) {
+                setIsMenuOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const handleLogout = () => {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
         router.push('/');
-        return;
-      }
-      setUser({ name: decoded.email.split('@')[0], email: decoded.email });
-    } catch {
-      setUser(null);
-    }
-  }, [pathname, router]);
+    };
 
   return (
-    <nav className="top-0 z-50 w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">
-      <div className="container mx-auto flex h-16 items-center justify-between px-6">
-
-        {/* LEFT: Branding */}
-        <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded bg-indigo-600 flex items-center justify-center shadow-indigo-200 shadow-lg">
-            <span className="text-white font-bold text-lg">A</span>
-          </div>
-          <span className="text-xl font-bold tracking-tight text-slate-900">
-            MirajTutor
-          </span>
-        </div>
-
-        {/* MIDDLE: Navigation Links */}
-        <div className="hidden md:flex items-center gap-8">
-          {['Home', 'About', 'Services', 'Contact'].map((link) => (
-            <Link
-              key={link}
-              href={`/${link === 'Home' ? '' : link.toLowerCase()}`}
-              className="text-sm font-semibold text-slate-600 transition-colors hover:text-indigo-600"
-            >
-              {link}
+    <header className="fixed top-0 left-0 right-0 z-50 h-16 bg-[#0A0A0F]/70 backdrop-blur-2xl border-b border-white/[0.03]">
+        <div className="max-w-7xl mx-auto px-6 h-full flex items-center justify-between">
+            <Link href="/" className="flex items-center gap-2.5 group">
+                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-amber-300 to-amber-500 flex items-center justify-center shadow-lg shadow-amber-500/30 group-hover:shadow-amber-400/50 group-hover:scale-105 transition-all duration-300">
+                    <span className="text-[#0A0A0F] font-bold text-lg">M</span>
+                </div>
+                <div className="hidden sm:block">
+                    <span className="text-xl font-bold tracking-tight text-amber-100">MirajTutor</span>
+                </div>
             </Link>
-          ))}
-        </div>
-
-        {/* RIGHT: Conditional Auth Section */}
-        <div className="hidden md:flex items-center gap-4">
-          {user ? (
-            /* --- LOGGED IN STATE --- */
-            <div className="flex items-center gap-4">
-              <span className="text-sm font-medium text-slate-700">
-                Hey, <span className="text-indigo-600 font-bold">{user.name}</span>
-              </span>
-              <button 
-                onClick={handleLogout}
-                className="text-sm font-semibold text-red-500 hover:text-red-700 transition-colors border border-red-100 px-3 py-1.5 rounded-lg hover:bg-red-50"
-              >
-                Logout
-              </button>
+            <nav className="hidden md:flex items-center gap-8">
+                <Link href="/" className="text-sm font-semibold text-amber-300/60 hover:text-amber-200/80 transition-colors">Home</Link>
+                <Link href="/about" className="text-sm font-semibold text-amber-300/60 hover:text-amber-200/80 transition-colors">About</Link>
+                <Link href="/services" className="text-sm font-semibold text-amber-300/60 hover:text-amber-200/80 transition-colors">Services</Link>
+                <Link href="/contact" className="text-sm font-semibold text-amber-300/60 hover:text-amber-200/80 transition-colors">Contact</Link>
+            </nav>
+            <div className="flex items-center gap-3">
+                {!isLoggedIn ? (
+                    <>
+                        <Link href="/login" className="hidden sm:block text-sm font-semibold text-amber-200/70 hover:text-amber-200 transition-colors px-3 py-2">Login</Link>
+                        <Link href="/signup" className="rounded-full bg-white text-[#0A0A0F] px-5 py-2.5 text-sm font-bold hover:bg-white/90 hover:-translate-y-0.5 active:scale-95 transition-all duration-200 shadow-lg">Sign Up Free</Link>
+                    </>
+                ) : (
+                    <div className="relative" ref={menuRef}>
+                        <button onClick={() => setIsMenuOpen(!isMenuOpen)} className="flex items-center gap-2 bg-white/[0.03] text-amber-200/80 px-4 py-2 rounded-xl font-semibold text-sm hover:bg-white/[0.06] transition-all border border-white/[0.06]">
+                            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-amber-300 to-amber-500 flex items-center justify-center text-[#0A0A0F] text-xs font-bold">U</div>
+                            <span>My Account</span>
+                        </button>
+                        {isMenuOpen && (
+                            <div className="absolute right-0 mt-2 w-48 bg-[#0A0A0F]/95 backdrop-blur-2xl rounded-xl shadow-2xl border border-white/[0.06] py-2">
+                                <Link href="/dashboard" className="block px-4 py-2 text-sm text-amber-200/70 hover:bg-white/[0.03] font-medium">Dashboard</Link>
+                                <button onClick={handleLogout} className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-400/10 font-medium">Logout</button>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
-          ) : (
-            /* --- GUEST STATE --- */
-            <>
-              <Link href={'/login'}>
-                <button className="text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors px-4 py-2">
-                  Login
-                </button>
-              </Link>
-              <Link href={'/signup'}>
-                <button className="rounded-full bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-md hover:bg-indigo-700 transition-all active:scale-95">
-                  Sign Up Free
-                </button>
-              </Link>
-            </>
-          )}
+            <button onClick={()=>setIsMenuOpen(!isMenuOpen)} className="md:hidden p-2 text-amber-200/70">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                </svg>
+            </button>
         </div>
+        {isMenuOpen && (
+            <div className="md:hidden bg-[#0A0A0F]/95 backdrop-blur-2xl border-t border-white/[0.03] px-6 py-4 space-y-3">
+                <Link href="/" className="block text-sm font-semibold text-amber-200/70">Home</Link>
+                <Link href="/about" className="block text-sm font-semibold text-amber-200/70">About</Link>
+                <Link href="/services" className="block text-sm font-semibold text-amber-200/70">Services</Link>
+                <Link href="/contact" className="block text-sm font-semibold text-amber-200/70">Contact</Link>
+            </div>
+        )}
+    </header>
+  )
+}
 
-        {/* MOBILE TOGGLE */}
-        <button
-          className="md:hidden text-slate-600 p-2"
-          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-          </svg>
-        </button>
-      </div>
-
-      {/* MOBILE MENU DROPDOWN */}
-      {isMobileMenuOpen && (
-        <div className="md:hidden bg-white border-b border-slate-200 px-6 py-4 flex flex-col gap-4">
-          {['Home', 'About', 'Services', 'Contact'].map((link) => (
-            <Link key={link} href={`/${link.toLowerCase()}`} className="text-sm font-semibold text-slate-600">
-              {link}
-            </Link>
-          ))}
-          <hr className="border-slate-100" />
-          <div className="flex flex-col gap-3">
-            {user ? (
-                <button onClick={handleLogout} className="w-full rounded-lg bg-red-50 py-3 text-sm font-bold text-red-600">Logout</button>
-            ) : (
-                <>
-                <Link href={'/login'}><button className="text-sm font-semibold text-slate-600 text-left">Login</button></Link>
-                <Link href={'/signup'}><button className="w-full rounded-lg bg-indigo-600 py-3 text-sm font-bold text-white">Sign Up Free</button></Link>
-                </>
-            )}
-          </div>
-        </div>
-      )}
-    </nav>
-  );
-};
-
-export default Header;
+export default Header

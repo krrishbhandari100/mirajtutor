@@ -27,23 +27,14 @@ import time
 import jwt
 import socketio
 import asyncio
+import threading
 import edge_tts
 import base64
-import numpy as np
-from faster_whisper import WhisperModel
-from tutor_resp import generate_tutor_response
+from tutor_resp import generate_tutor_response, generate_tutor_response_stream
 from document_parser import parse_document
 
 import json
-import json5
 import re
-
-print("⏳ Loading model... (This might take time if downloading)")
-try:
-    model = WhisperModel("medium", device="cpu", compute_type="int8")
-    print("✅ Model loaded successfully!")
-except Exception as e:
-    print(f"❌ Error: {e}")
 
 
 class UserSignUpSchema(BaseModel):
@@ -54,6 +45,8 @@ class UserSignUpSchema(BaseModel):
 
 
 class UserLoginSchema(BaseModel):
+    first_name: str = None
+    last_name: str = None
     email: str
     password: str
 
@@ -195,10 +188,6 @@ async def delete_room_route(data: DeleteRoomSchema):
     return result
 
 
-# ============================================================================
-# UPLOAD DOCUMENT ENDPOINT
-# ============================================================================
-
 from fastapi import File, UploadFile, Form
 
 
@@ -237,10 +226,6 @@ async def upload_document(file: UploadFile = File(...), sid: str = Form(...)):
         raise HTTPException(status_code=500, detail="Failed to parse document")
 
 
-# ============================================================================
-# TEXT-TO-SPEECH ENDPOINT (for connecting sentence playback)
-# ============================================================================
-
 class TTSRequest(BaseModel):
     text: str
 
@@ -264,14 +249,12 @@ sio = socketio.AsyncServer(
 )
 
 # --- IN-MEMORY STATE ---
-active_audio_buffers = {}
 session_contexts = {}
 interruption_flags = {}
-chat_histories = {} 
-processing_flags = {}
-session_board_pages = {}  # { sid: { current: 1, total: 1 } } 
-uploaded_documents = {}  # { sid: { text, pages[], images[], type, filename } }
-continue_teaching_sids = set()  # SIDs with active continuation background tasks
+chat_histories = {}
+session_board_pages = {}
+uploaded_documents = {}
+continue_teaching_sids = set()
 
 TTS_VOICES = {
     "hi": "hi-IN-SwaraNeural",
@@ -302,38 +285,68 @@ WELCOME_TEXTS = {
 }
 
 
-# ── JSON Utilities ──────────────────────────────────────────────────
+# ── JSON Utilities (using json-repair) ────────────────────────────
+
+
+from json_repair import repair_json
 
 
 def strip_markdown_fences(text):
     text = text.strip()
     if text.startswith('```'):
-        text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+        text = re.sub(r'^```[a-z]*\s*\n?', '', text)
         text = re.sub(r'\n?```\s*$', '', text)
     return text.strip()
 
-def extract_speaking_fallback(raw):
-    m = re.search(r'content\s*:\s*["\']?(.*?)(?:["\']?\s*,\s*(?:\w+|"\w+")\s*:|\s*,\s*boardresponse)', raw, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r'(?:speakingresponse|"speakingresponse")\s*:\s*["\']?(.*?)["\']?\s*(?:,\s*(?:\w+|"\w+")\s*:|\Z)', raw, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    return None
+
+def normalize_keys(d):
+    key_map = {
+        'speech_response': 'speakingresponse',
+        'speech': 'speakingresponse',
+        'response': 'speakingresponse',
+        'board': 'boardresponse',
+        'board_response': 'boardresponse',
+        'board_data': 'boardresponse',
+    }
+    if isinstance(d, dict):
+        for old, new in key_map.items():
+            if old in d and new not in d:
+                d[new] = d.pop(old)
+        if 'boardresponse' in d and isinstance(d['boardresponse'], dict):
+            normalize_keys(d['boardresponse'])
+    return d
+
 
 def parse_ollama_json(text):
-    """Parse LLM output as JSON using JSON5 (handles comments, trailing commas, etc.)."""
     try:
         clean = strip_markdown_fences(text)
         match = re.search(r'\{.*\}', clean, re.DOTALL)
         if not match:
             return None, False
-        parsed = json5.loads(match.group(0).strip())
+        parsed = repair_json(match.group(0).strip(), return_objects=True)
+        if isinstance(parsed, dict):
+            parsed = normalize_keys(parsed)
         return parsed, True
     except Exception as e:
-        print(f"🔍 parse_ollama_json FAILED: {e}")
-        print(f"🔍 REPR of text:\n{repr(match.group(0).strip())}")
+        print(f"❌ json-repair failed: {e}")
+        print(f"  Text: {text[:200]}...")
+        # Last resort: fallback regex extraction
+        m = re.search(r'"speakingresponse"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+        if m:
+            speaking = re.sub(r'[\*_#]+', '', m.group(1)).strip()
+            return {'speakingresponse': speaking, 'boardresponse': {}, 'has_more': False, 'discardQueue': False}, True
         return None, False
+
+
+def _try_extract_speakingresponse(buffer):
+    try:
+        match = re.search(r'"speakingresponse"\s*:\s*"((?:[^"\\]|\\.)*)"', buffer, re.DOTALL)
+        if match:
+            text = re.sub(r'[\*_#]+', '', match.group(1)).strip()
+            return text
+    except:
+        pass
+    return None
 
 
 async def build_ai_reply_payload(text: str, lang="en"):
@@ -344,13 +357,9 @@ async def build_ai_reply_payload(text: str, lang="en"):
     audio_data = b""
     word_boundaries = []
 
-    chunk_count = 0
     async for chunk in communicate.stream():
-        chunk_count += 1
         if chunk["type"] == "audio":
             audio_data += chunk["data"]
-            if chunk_count % 10 == 0:  # Log every 10 chunks to avoid spam
-                print(f"🔊 Received audio chunk {chunk_count}, size: {len(chunk['data'])} bytes")
         elif chunk["type"] == "WordBoundary":
             word_boundaries.append({
                 "word": chunk["text"],
@@ -358,11 +367,9 @@ async def build_ai_reply_payload(text: str, lang="en"):
                 "duration": chunk["duration"] / 10000000,
             })
 
-    print(f"🔊 Finished building audio payload: {len(audio_data)} bytes audio, {len(word_boundaries)} word boundaries")
-    
     if len(audio_data) == 0:
         print("⚠️ WARNING: No audio data received from Edge TTS!")
-    
+
     return {
         "text": text,
         "audio": base64.b64encode(audio_data).decode("utf-8"),
@@ -372,14 +379,45 @@ async def build_ai_reply_payload(text: str, lang="en"):
     }
 
 
+async def _stream_ollama_response(subject, topic, system_prompt, chat_history, msg,
+                                   board_context="", document_images=None,
+                                   speaking_lang="en", writing_lang="en"):
+    loop = asyncio.get_running_loop()
+    queue = asyncio.Queue()
+
+    def _run():
+        try:
+            for token in generate_tutor_response_stream(
+                subject, topic, system_prompt, chat_history, msg,
+                board_context=board_context, document_images=document_images,
+                speaking_lang=speaking_lang, writing_lang=writing_lang,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, token)
+        except Exception as e:
+            print(f"❌ Stream error: {e}")
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    while True:
+        token = await queue.get()
+        if token is None:
+            break
+        yield token
+
+
+# ── Socket.IO Events ────────────────────────────────────────────────
+
+
 @sio.event
 async def connect(sid, environ):
     print(f"🟢 User connected! SID: {sid}")
-    active_audio_buffers[sid] = []
     interruption_flags[sid] = False
     session_contexts[sid] = {}
-    chat_histories[sid] = [] 
-    processing_flags[sid] = False
+    chat_histories[sid] = []
     session_board_pages[sid] = {"current": 1, "total": 1, "cmd_count": 0}
 
 
@@ -399,11 +437,9 @@ async def user_language(sid, data):
 @sio.event
 async def disconnect(sid):
     print(f"🔴 User disconnected! SID: {sid}")
-    active_audio_buffers.pop(sid, None)
     interruption_flags.pop(sid, None)
     session_contexts.pop(sid, None)
-    chat_histories.pop(sid, None) 
-    processing_flags.pop(sid, None)
+    chat_histories.pop(sid, None)
     session_board_pages.pop(sid, None)
     uploaded_documents.pop(sid, None)
     continue_teaching_sids.discard(sid)
@@ -436,46 +472,22 @@ async def session_context(sid, data):
 
 @sio.event
 async def session_cancelled(sid):
-    print(f"🚫 Session cancelled for {sid} — flushing buffer.")
-    active_audio_buffers[sid] = []
+    print(f"🚫 Session cancelled for {sid}")
     interruption_flags[sid] = True
-    chat_histories[sid] = [] 
+    chat_histories[sid] = []
 
 
 @sio.event
 async def speech_started(sid):
-    # 💥 IGNORE if AI is currently thinking!
-    if processing_flags.get(sid):
-        return 
-        
     print(f"👂 Student {sid} started speaking...")
-    active_audio_buffers[sid] = []
     interruption_flags[sid] = False
-
-
-@sio.event
-async def audio_chunk(sid, data):
-    # 💥 IGNORE background noise chunks if AI is thinking!
-    if processing_flags.get(sid):
-        return 
-        
-    try:
-        audio_array = np.frombuffer(data, dtype=np.float32)
-        if sid not in active_audio_buffers:
-            active_audio_buffers[sid] = []
-        if audio_array.size > 0:
-            active_audio_buffers[sid].append(audio_array)
-    except Exception as e:
-        print(f"❌ audio_chunk error for {sid}: {e}")
 
 
 @sio.event
 async def user_interrupted(sid):
     print(f"🛑 Student {sid} interrupted the AI!")
     interruption_flags[sid] = True
-    processing_flags[sid] = False  # Allow new speech to flow immediately
-    continue_teaching_sids.discard(sid)  # Stop background continuation
-    # Advance to a new page if the current one has content
+    continue_teaching_sids.discard(sid)
     if session_board_pages[sid]['cmd_count'] > 0:
         session_board_pages[sid]['total'] += 1
         session_board_pages[sid]['current'] = session_board_pages[sid]['total']
@@ -483,64 +495,27 @@ async def user_interrupted(sid):
 
 
 @sio.event
-async def speech_ended(sid):
+async def speech_ended(sid, data=None):
     print(f"🛑 {sid} stopped speaking")
 
-    # Guard against double-triggers
-    if processing_flags.get(sid) or interruption_flags.get(sid):
+    if interruption_flags.get(sid):
         return
 
-    if sid not in active_audio_buffers or len(active_audio_buffers[sid]) == 0:
+    user_text = (data.get('text', '') if isinstance(data, dict) else '').strip()
+    if not user_text:
+        print("⚠️ speech_ended: no transcript received")
         return
 
-    # 💥 LOCK THE MIC: The AI is busy now!
-    processing_flags[sid] = True 
+    print(f"📝 User said: {user_text}")
 
     try:
-        full_audio = np.concatenate(active_audio_buffers[sid]).astype(np.float32)
-        active_audio_buffers[sid] = []
-
-        if full_audio.size == 0:
-            return
-
-        print("🎤 Transcribing...")
-        session_lang = session_contexts.get(sid, {}).get('speaking_lang', 'en')
-        segments, info = await asyncio.to_thread(
-            model.transcribe,
-            full_audio,
-            language=session_lang,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-            condition_on_previous_text=False,
-            temperature=0.0,
-        )
-
-        user_text = "".join(segment.text for segment in segments).strip()
-        user_lang = info.language
-        print(f"📝 Raw Whisper Output ({user_lang}): {user_text}")
-
-        # 💥 The Ghost Filter (Blacklist) — only for English
-        if user_lang == "en":
-            clean_text = user_text.lower().replace(".", "").replace("!", "").replace("?", "").strip()
-            ghost_phrases = ["thank you", "okay", "ok", "thanks for watching", "subscribe", "bye", "thank you so much", "yeah"]
-
-            if not clean_text or len(clean_text) <= 1 or clean_text in ghost_phrases:
-                print("👻 Whisper hallucination detected and ignored.")
-                return
-
-        print("✅ Clean User Text:", user_text)
-
-        if interruption_flags.get(sid):
-            return
-
-        print("🧠 Generating AI response (first chunk)...")
         ctx = session_contexts.get(sid, {})
         topic = ctx.get('topic', '')
         system_prompt = ctx.get('prevCtx', '')
         speaking_lang = ctx.get('speaking_lang', 'en')
         writing_lang = ctx.get('writing_lang', 'en')
         current_history = chat_histories.get(sid, [])
-        
+
         board_pages = session_board_pages.get(sid, {"current": 1, "total": 1, "cmd_count": 0})
         cmd_count = board_pages.get('cmd_count', 0)
         board_ctx = f"Page {board_pages['current']} of {board_pages['total']} ({cmd_count} items on board, LIMIT ~8 items before overwriting)"
@@ -548,60 +523,75 @@ async def speech_ended(sid):
         doc_info = uploaded_documents.get(sid, {})
         doc_images = [p["image_base64"] for p in doc_info.get("pages", [])]
 
-        ai_response_text = await asyncio.to_thread(
-            generate_tutor_response,
-            '', topic, system_prompt, current_history, user_text,
-            board_context=board_ctx,
-            document_images=doc_images,
-            is_continuation=False,
-            speaking_lang=speaking_lang,
-            writing_lang=writing_lang,
-        )
+        if interruption_flags.get(sid):
+            return
 
-        try:
-            import re as _re
-            _match = _re.search(r'\{.*\}', ai_response_text, _re.DOTALL)
-            if _match:
-                _parsed, _ = json.JSONDecoder().raw_decode(_match.group(0).strip())
-                print(f"\n{'='*60}\n📦 MODEL JSON RESPONSE:\n{json.dumps(_parsed, indent=2, ensure_ascii=False)}\n{'='*60}")
-            else:
-                print(f"\n{'='*60}\n📦 MODEL RAW (no JSON found):\n{ai_response_text}\n{'='*60}")
-        except Exception as _dbg_e:
-            print(f"\n{'='*60}\n📦 MODEL RAW (parse failed: {_dbg_e}):\n{ai_response_text}\n{'='*60}")
+        # ── STREAMING OLLAMA + PARALLEL TTS ──
+        buffer = ""
+        tts_task = None
+        speaking_response_early = None
+
+        async for token in _stream_ollama_response(
+            '', topic, system_prompt, current_history, user_text,
+            board_context=board_ctx, document_images=doc_images,
+            speaking_lang=speaking_lang, writing_lang=writing_lang,
+        ):
+            if interruption_flags.get(sid):
+                if tts_task:
+                    tts_task.cancel()
+                return
+            buffer += token
+            if tts_task is None:
+                text = _try_extract_speakingresponse(buffer)
+                if text:
+                    speaking_response_early = text
+                    print(f"🎯 Speaking text detected early ({len(text)} chars), starting TTS in parallel...")
+                    tts_task = asyncio.create_task(
+                        build_ai_reply_payload(text, lang=speaking_lang)
+                    )
+
+        ai_response_text = buffer
+
+        if interruption_flags.get(sid):
+            if tts_task:
+                tts_task.cancel()
+            return
+
+        # Debug: print raw model output
+        print(f"\n{'='*60}\n📦 MODEL RAW OUTPUT:\n{ai_response_text}\n{'='*60}")
 
         if not ai_response_text or interruption_flags.get(sid):
             return
 
-        # --- ROBUST JSON EXTRACTION (single chunk) ---
         chunk = None
         chunk_has_more = False
         parsed, ok = parse_ollama_json(ai_response_text)
         if ok and isinstance(parsed, dict):
             chunk = parsed
             chunk_has_more = parsed.get('has_more', False)
-            print(f"📦 PARSED single chunk (has_more={chunk_has_more})")
+            print(f"📦 PARSED chunk (has_more={chunk_has_more})")
         else:
-            print("⚠️ JSON parse failed — trying fallback extraction")
-            fallback_text = extract_speaking_fallback(ai_response_text)
-            speaking_text = fallback_text if fallback_text else "I heard you, but I could not generate a proper response."
-            if speaking_text:
-                chunk = {'speakingresponse': speaking_text, 'boardresponse': {}}
+            print("⚠️ JSON parse failed")
+            chunk = {'speakingresponse': "I heard you, but I could not generate a proper response.", 'boardresponse': {}, 'has_more': False, 'discardQueue': False}
 
-        if not chunk or not chunk.get('speakingresponse', '').strip():
-            speaking_text = "I heard you, but I could not generate a response."
-            chunk = {'speakingresponse': speaking_text, 'boardresponse': {}}
-            chunk_has_more = False
+        if not chunk.get('speakingresponse', '').strip():
+            chunk['speakingresponse'] = "I heard you, but I could not generate a response."
+
+        if chunk.get('discardQueue'):
+            print("🧹 Model says: discard queue — flushing old chunks")
+            asyncio.create_task(sio.emit("queue_clear", {}, room=sid))
 
         chunk['speakingresponse'] = re.sub(r'[\*_#]+', '', chunk['speakingresponse']).strip()
 
         # Update board state from this chunk
         br = chunk.get('boardresponse', {})
-        if isinstance(br, dict) and br.get('action') == 'newpage':
+        action = br.get('action', 'draw') if isinstance(br, dict) else 'draw'
+        if action == 'newpage':
             if session_board_pages[sid]['cmd_count'] > 0:
                 session_board_pages[sid]['total'] += 1
                 session_board_pages[sid]['current'] = session_board_pages[sid]['total']
             session_board_pages[sid]['cmd_count'] = 0
-        elif isinstance(br, dict) and br.get('action') == 'gotopage':
+        elif action == 'gotopage':
             target = br.get('page', 0)
             if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
                 session_board_pages[sid]['current'] = target
@@ -609,7 +599,6 @@ async def speech_ended(sid):
         chunk['_targetPage'] = session_board_pages[sid]['current']
 
         if isinstance(br, dict):
-            action = br.get('action', '')
             if action in ('clear', 'erasepage'):
                 session_board_pages[sid]['cmd_count'] = 0
             elif action != 'newpage':
@@ -622,17 +611,22 @@ async def speech_ended(sid):
         if sid not in chat_histories:
             chat_histories[sid] = []
         chat_histories[sid].append({"role": "user", "content": user_text})
-        chat_histories[sid].append({"role": "assistant", "content": chunk['speakingresponse']})
+        chat_histories[sid].append({"role": "assistant", "content": ai_response_text})
         if len(chat_histories[sid]) > 10:
             first = chat_histories[sid][:2]
             rest = chat_histories[sid][2:]
             chat_histories[sid] = first + rest[-8:]
 
-        print(f"🎯 EXTRACTED SPEAKING_TEXT:\n{chunk['speakingresponse'][:300]}\n{'='*60}")
+        print(f"🎯 SPEAKING:\n{chunk['speakingresponse'][:300]}\n{'='*60}")
 
-        # TTS and emit first chunk
-        print(f"🔊 Generating TTS for first chunk...")
-        payload = await build_ai_reply_payload(chunk['speakingresponse'], lang=speaking_lang)
+        if tts_task:
+            print("⏳ Waiting for early TTS to complete...")
+            payload = await tts_task
+            payload['text'] = chunk['speakingresponse']
+        else:
+            print(f"🔊 Generating TTS for first chunk...")
+            payload = await build_ai_reply_payload(chunk['speakingresponse'], lang=speaking_lang)
+
         payload['boardresponse'] = chunk.get('boardresponse')
         payload['itemIndex'] = 0
         payload['totalItems'] = 'more' if chunk_has_more else 1
@@ -646,10 +640,6 @@ async def speech_ended(sid):
 
     except Exception as e:
         print(f"❌ speech_ended error for {sid}: {e}")
-        
-    finally:
-        # 💥 UNLOCK THE MIC: AI is done, user can speak again!
-        processing_flags[sid] = False
 
 
 async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1, speaking_lang="en", writing_lang="en"):
@@ -676,19 +666,8 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
             if not ai_response_text or interruption_flags.get(sid):
                 break
 
-            # Debug: print raw model output
-            try:
-                import re as _re
-                _match = _re.search(r'\{.*\}', ai_response_text, _re.DOTALL)
-                if _match:
-                    _parsed = json5.loads(_match.group(0).strip())
-                    print(f"\n{'='*60}\n📦 CONTINUATION MODEL RESPONSE:\n{json.dumps(_parsed, indent=2, ensure_ascii=False)}\n{'='*60}")
-                else:
-                    print(f"\n{'='*60}\n📦 CONTINUATION RAW (no JSON):\n{ai_response_text}\n{'='*60}")
-            except Exception as _dbg_e:
-                print(f"\n{'='*60}\n📦 CONTINUATION RAW (parse failed: {_dbg_e}):\n{ai_response_text}\n{'='*60}")
+            print(f"\n{'='*60}\n📦 CONTINUATION RAW OUTPUT:\n{ai_response_text}\n{'='*60}")
 
-            # Parse the single chunk using shared utilities
             chunk = None
             has_more = False
             parsed, ok = parse_ollama_json(ai_response_text)
@@ -696,14 +675,8 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
                 chunk = parsed
                 has_more = parsed.get('has_more', False)
             else:
-                print(f"⚠️ Continuation parse failed — trying fallback extraction")
-                fallback_text = extract_speaking_fallback(ai_response_text)
-                if fallback_text:
-                    chunk = {'speakingresponse': fallback_text, 'boardresponse': {}, '_targetPage': session_board_pages.get(sid, {}).get('current', 1)}
-                    has_more = False
-                else:
-                    print(f"⚠️ Fallback also failed — stopping continuation")
-                    break
+                print(f"⚠️ Continuation parse failed — stopping")
+                break
 
             if not chunk or not chunk.get('speakingresponse', '').strip():
                 break
@@ -712,12 +685,13 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
 
             # Update board state
             br = chunk.get('boardresponse', {})
-            if isinstance(br, dict) and br.get('action') == 'newpage':
+            action = br.get('action', 'draw') if isinstance(br, dict) else 'draw'
+            if action == 'newpage':
                 if session_board_pages[sid]['cmd_count'] > 0:
                     session_board_pages[sid]['total'] += 1
                     session_board_pages[sid]['current'] = session_board_pages[sid]['total']
                 session_board_pages[sid]['cmd_count'] = 0
-            elif isinstance(br, dict) and br.get('action') == 'gotopage':
+            elif action == 'gotopage':
                 target = br.get('page', 0)
                 if isinstance(target, int) and 0 < target <= session_board_pages[sid]['total']:
                     session_board_pages[sid]['current'] = target
@@ -725,7 +699,6 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
             chunk['_targetPage'] = session_board_pages[sid]['current']
 
             if isinstance(br, dict):
-                action = br.get('action', '')
                 if action in ('clear', 'erasepage'):
                     session_board_pages[sid]['cmd_count'] = 0
                 elif action != 'newpage':
@@ -736,7 +709,7 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
 
             # Save to chat history
             if sid in chat_histories:
-                chat_histories[sid].append({"role": "assistant", "content": chunk['speakingresponse']})
+                chat_histories[sid].append({"role": "assistant", "content": ai_response_text})
                 if len(chat_histories[sid]) > 10:
                     first = chat_histories[sid][:2]
                     rest = chat_histories[sid][2:]
@@ -744,7 +717,6 @@ async def continue_teaching(sid, topic, system_prompt, doc_images, chunk_index=1
 
             print(f"🎯 CONTINUATION ({chunk_index}): {chunk['speakingresponse'][:200]}")
 
-            # TTS and emit
             payload = await build_ai_reply_payload(chunk['speakingresponse'], lang=speaking_lang)
             payload['boardresponse'] = chunk.get('boardresponse')
             payload['itemIndex'] = chunk_index

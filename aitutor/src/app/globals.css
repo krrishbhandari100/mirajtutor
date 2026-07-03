@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,200;9..144,400;9..144,500;9..144,600;9..144,700;9..144,800;9..144,900&display=swap');
 @import "tailwindcss";
 
 :root {
@@ -10,6 +11,18 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-serif: var(--font-serif);
+
+  --color-amber-50: #FFFBEB;
+  --color-amber-100: #FEF3C7;
+  --color-amber-200: #FDE68A;
+  --color-amber-300: #FCD34D;
+  --color-amber-400: #FBBF24;
+  --color-amber-500: #F59E0B;
+  --color-amber-600: #D97706;
+  --color-amber-700: #B45309;
+  --color-amber-800: #92400E;
+  --color-amber-900: #78350F;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,14 +36,126 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
+@keyframes breathe-core {
+  0%, 100% { transform: scale(1); opacity: 0.8; }
+  50%      { transform: scale(1.06); opacity: 1; }
+}
+@keyframes breathe-mid {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%      { transform: scale(1.12); opacity: 0.8; }
+}
+@keyframes breathe-outer {
+  0%, 100% { transform: scale(1); opacity: 0.2; }
+  50%      { transform: scale(1.18); opacity: 0.4; }
+}
+@keyframes breathe-ambient {
+  0%, 100% { transform: scale(1); opacity: 0.1; }
+  50%      { transform: scale(1.25); opacity: 0.2; }
+}
+@keyframes breathe-wide {
+  0%,100%{opacity:.08;transform:scale(1)}
+  50%{opacity:.15;transform:scale(1.25)}
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(30px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(251,191,36,0.5); }
+  70%  { box-shadow: 0 0 0 25px rgba(251,191,36,0); }
+  100% { box-shadow: 0 0 0 0 rgba(251,191,36,0); }
+}
+@keyframes shimmer-text {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+@keyframes ember-A {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 1; }
+  85%      { opacity: 0.6; }
+  100%     { opacity: 0; transform: translate(15px, -130px) scale(0.2); }
+}
+@keyframes ember-B {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 0.8; }
+  85%      { opacity: 0.4; }
+  100%     { opacity: 0; transform: translate(-25px, -110px) scale(0.15); }
+}
+@keyframes ember-C {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 0.9; }
+  85%      { opacity: 0.5; }
+  100%     { opacity: 0; transform: translate(35px, -90px) scale(0.25); }
+}
+@keyframes ember-D {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 0.7; }
+  85%      { opacity: 0.3; }
+  100%     { opacity: 0; transform: translate(-10px, -150px) scale(0.1); }
+}
+@keyframes ember-E {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 1; }
+  85%      { opacity: 0.5; }
+  100%     { opacity: 0; transform: translate(50px, -70px) scale(0.15); }
+}
+@keyframes ember-F {
+  0%, 100% { opacity: 0; transform: translate(0, 0) scale(1); }
+  15%      { opacity: 0.6; }
+  85%      { opacity: 0.3; }
+  100%     { opacity: 0; transform: translate(-40px, -100px) scale(0.2); }
+}
 @keyframes upload-bar {
   0% { width: 0%; margin-left: 0%; }
   50% { width: 60%; margin-left: 40%; }
   100% { width: 0%; margin-left: 100%; }
 }
-
-.animate-upload-bar {
-  animation: upload-bar 1.5s ease-in-out infinite;
+@keyframes glow-pulse {
+  0%,100%{opacity:.6}
+  50%{opacity:1}
 }
+@keyframes sunlight-drift {
+  0%,100%{transform:translateX(0) scale(1);opacity:.12}
+  50%{transform:translateX(20px) scale(1.05);opacity:.18}
+}
+
+.ember { position: absolute; border-radius: 50%; box-shadow: 0 0 6px currentColor, 0 0 12px currentColor; }
+
+.animate-breathe-core   { animation: breathe-core 4s ease-in-out infinite; }
+.animate-breathe-mid    { animation: breathe-mid 5s ease-in-out infinite; }
+.animate-breathe-outer  { animation: breathe-outer 6s ease-in-out infinite; }
+.animate-breathe-ambient{ animation: breathe-ambient 7s ease-in-out infinite; }
+.animate-breathe-wide   { animation: breathe-wide 8s ease-in-out infinite; }
+.animate-ember-A { animation: ember-A 6s ease-in-out infinite; }
+.animate-ember-B { animation: ember-B 7s ease-in-out infinite; }
+.animate-ember-C { animation: ember-C 8s ease-in-out infinite; }
+.animate-ember-D { animation: ember-D 9s ease-in-out infinite; }
+.animate-ember-E { animation: ember-E 6.5s ease-in-out infinite; }
+.animate-ember-F { animation: ember-F 7.5s ease-in-out infinite; }
+.animate-fade-up { animation: fade-up 0.9s ease-out forwards; }
+.animate-pulse-ring { animation: pulse-ring 3s ease-out infinite; }
+.animate-shimmer-text { background-size: 200% 100%; animation: shimmer-text 5s linear infinite; }
+.animate-upload-bar { animation: upload-bar 1.5s ease-in-out infinite; }
+.animate-glow-pulse { animation: glow-pulse 3s ease-in-out infinite; }
+.animate-sunlight { animation: sunlight-drift 8s ease-in-out infinite; }
+
+.delay-1  { animation-delay: 0.1s; }
+.delay-2  { animation-delay: 0.2s; }
+.delay-3  { animation-delay: 0.3s; }
+.delay-4  { animation-delay: 0.4s; }
+.delay-5  { animation-delay: 0.5s; }
+.delay-6  { animation-delay: 0.6s; }
+.delay-7  { animation-delay: 0.7s; }
+.delay-8  { animation-delay: 0.8s; }
+.d-0  { animation-delay: 0s; }
+.d-1  { animation-delay: 0.8s; }
+.d-2  { animation-delay: 1.6s; }
+.d-3  { animation-delay: 2.4s; }
+.d-4  { animation-delay: 3.2s; }
+.d-5  { animation-delay: 4s; }
+.d-6  { animation-delay: 4.8s; }
+.d-7  { animation-delay: 5.6s; }

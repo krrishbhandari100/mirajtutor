@@ -1,11 +1,10 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { Suspense, useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { socket } from './socket';
 
-// Dynamically import the 3D Avatar and Board so they don't break Next.js Server-Side Rendering
 const TalkingTutor = dynamic(() => import('@/Components/TalkingTutor'), {
   ssr: false,
 });
@@ -13,51 +12,48 @@ const BoardCanvas = dynamic(() => import('@/Components/BoardCanvas'), {
   ssr: false,
 });
 
-const Page = () => {
+function RoomContent() {
   const searchParams = useSearchParams();
   const roomId = searchParams.get('roomId');
 
   // =====================================================================
-  // CHAPTER 1: REFS (The Hidden Memory)
-  // Why Refs? React 'useState' triggers a visual screen refresh every time it changes. 
-  // In a fast audio loop running 60 times a second, 'useState' would crash the app.
-  // Refs let us store changing data silently in the background.
+  // REFS
   // =====================================================================
 
-  // DOM Elements
-  const avatarRef = useRef(null);      // The 3D Avatar object
-  const boardRef = useRef(null);       // The Board Canvas object
+  const avatarRef = useRef(null);
+  const boardRef = useRef(null);
 
-  // Hardware Streams
-  const micStreamRef = useRef(null);    // Holds the raw microphone data
+  // Speech Recognition (webkitSpeechRecognition)
+  const recognitionRef = useRef(null);
+  const recognitionRestartRef = useRef(true);
+  const silenceTimeoutRef = useRef(null);
+  const SILENCE_DELAY = 1500;
+  const speakingRef = useRef(false);
 
-  // Web Audio API Elements (The Audio Engine)
-  const audioContextRef = useRef(null); // The master audio engine
-  const analyserRef = useRef(null);     // The tool that measures volume/frequency
-  const processorRef = useRef(null);    // The tool that chops audio into chunks
-  const animationFrameRef = useRef(null); // The loop that runs 60 times a second
-  const silenceTimeoutRef = useRef(null); // The countdown timer for when you stop talking
+  // Interrupt detection (AnalyserNode RMS loop during AI speech)
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const interruptAnimationRef = useRef(null);
 
-  // Status Flags (True/False switches)
-  const isSpeakingRef = useRef(false);      // Is the student currently talking?
-  const isSessionActiveRef = useRef(false); // Has the "Start" button been clicked?
-  const sessionStartingRef = useRef(false); // Prevents clicking "Start" twice quickly
-  const sessionStoppedRef = useRef(false);  // Forces everything to shut down
-  const interruptedRef = useRef(false);     // True when student interrupts, checked before playing audio
+  // AI speech state
+  const isTutorSpeakingRef = useRef(false);
+  const tutorCooldownRef = useRef(null);
+  const COOLDOWN_DELAY = 1200;
 
-  // VAD (Voice Activity Detection) - Math variables to measure room noise
-  const noiseFloorRef = useRef(0);
-  const calibrationFramesRef = useRef(0);
-  const CALIBRATION_FRAMES = 45; // Wait ~1.5 seconds to measure room silence
-  const NOISE_MULTIPLIER = 1.15; // Must speak 15% louder than room to trigger
+  // Session
+  const isSessionActiveRef = useRef(false);
+  const sessionStartingRef = useRef(false);
+  const sessionStoppedRef = useRef(false);
+  const interruptedRef = useRef(false);
 
-  // AI Guard Rails
-  const isTutorSpeakingRef = useRef(false); // Mutes the mic when the AI talks (prevents echoes)
-  const tutorCooldownRef = useRef(null);    // A small delay after the AI stops before mic turns on
+  // Queue
+  const itemQueueRef = useRef([]);
+  const isProcessingRef = useRef(false);
+  const interruptedQueueBackupRef = useRef([]);
 
   // =====================================================================
-  // CHAPTER 2: STATE (The Visible UI)
-  // These variables DO trigger screen refreshes. Use them for UI text, buttons, etc.
+  // STATE
   // =====================================================================
 
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -78,7 +74,6 @@ const Page = () => {
   const boardCurrentPageRef = useRef(0);
   const boardTotalPagesRef = useRef(0);
 
-  // Language settings
   const [speakingLang, setSpeakingLang] = useState('en');
   const [writingLang, setWritingLang] = useState('en');
   const LANG_OPTIONS = [
@@ -95,77 +90,182 @@ const Page = () => {
     { value: 'ur', label: 'Urdu' },
   ];
 
-  // Send language preference to backend and get welcome message in that language
   useEffect(() => {
     if (socket.connected) {
       socket.emit('user_language', { lang: speakingLang });
     }
   }, [speakingLang]);
 
-  // Sequential chunk queue for AI replies
-  const itemQueueRef = useRef([]);
-  const isProcessingRef = useRef(false);
-  const interruptedQueueBackupRef = useRef([]);
+  // =====================================================================
+  // SPEECH RECOGNITION (webkitSpeechRecognition)
+  // =====================================================================
 
-  const updateBoardPageState = () => {
-    const board = boardRef.current;
-    if (!board) return;
-    const cp = board.getCurrentPage?.() || 1;
-    const tp = board.getTotalPages?.() || 1;
-    boardCurrentPageRef.current = cp;
-    boardTotalPagesRef.current = tp;
-    setBoardCurrentPage(cp);
-    setBoardTotalPages(tp);
+  const startRecognition = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (recognitionRef.current) {
+      const oldRec = recognitionRef.current;
+      oldRec.onend = null;
+      try { oldRec.stop(); } catch {}
+      recognitionRef.current = null;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = speakingLang + '-IN';
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      if (!isSessionActiveRef.current || sessionStoppedRef.current) return;
+      if (isMutedRef.current) return;
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+
+      const last = event.results[event.results.length - 1];
+      if (!last.isFinal) return;
+
+      const text = last[0].transcript.trim();
+      if (!text) return;
+
+      if (!speakingRef.current) {
+        speakingRef.current = true;
+        socket.emit('speech_started');
+      }
+
+      silenceTimeoutRef.current = setTimeout(() => {
+        speakingRef.current = false;
+        setStatusText('Processing...');
+        socket.emit('speech_ended', { text });
+        silenceTimeoutRef.current = null;
+      }, SILENCE_DELAY);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed') return;
+      if (event.error === 'aborted') return;
+      if (event.error === 'network') {
+        alert('Speech recognition failed due to a network issue. Please use Chrome, Edge, or Opera for better support.');
+        recognitionRestartRef.current = false;
+        return;
+      }
+      if (recognitionRestartRef.current && isSessionActiveRef.current && !sessionStoppedRef.current) {
+        setTimeout(() => startRecognition(), 500);
+      }
+    };
+
+    recognition.onend = () => {
+      if (recognitionRestartRef.current && isSessionActiveRef.current && !sessionStoppedRef.current && !isTutorSpeakingRef.current) {
+        setTimeout(() => startRecognition(), 100);
+      }
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
   };
 
-  const handleAvatarReady = useCallback((avatarInstance) => {
-    avatarRef.current = avatarInstance;
-    setIsTutorReady(true);
-  }, []);
+  const stopRecognition = () => {
+    recognitionRestartRef.current = false;
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
+    }
+    speakingRef.current = false;
+  };
 
-  const handleUploadDoc = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setIsUploading(true);
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('sid', socket.id || '');
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/upload_doc`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setDocInfo(data);
+  // =====================================================================
+  // INTERRUPT DETECTION (AnalyserNode RMS loop during AI speech)
+  // =====================================================================
+
+  const startInterruptDetection = () => {
+    if (!audioContextRef.current || !analyserRef.current) return;
+
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+
+    const detect = async () => {
+      if (!isTutorSpeakingRef.current || !isSessionActiveRef.current || sessionStoppedRef.current || isMutedRef.current) {
+        interruptAnimationRef.current = requestAnimationFrame(detect);
+        return;
       }
-    } catch (err) {
-      console.error('Upload error:', err);
-    } finally {
-      setIsUploading(false);
-      e.target.value = '';
+
+      analyserRef.current.getByteTimeDomainData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const val = (dataArray[i] - 128) / 128;
+        sum += val * val;
+      }
+      const rms = Math.sqrt(sum / dataArray.length);
+
+      if (rms > 0.08) {
+        interruptedQueueBackupRef.current = itemQueueRef.current.splice(0);
+        isProcessingRef.current = false;
+        interruptedRef.current = true;
+
+        if (!recognitionRef.current) {
+          recognitionRestartRef.current = true;
+          startRecognition();
+        }
+
+        await stopTutorSpeech();
+
+        if (tutorCooldownRef.current) {
+          clearTimeout(tutorCooldownRef.current);
+          tutorCooldownRef.current = null;
+        }
+        isTutorSpeakingRef.current = false;
+
+        socket.emit('user_interrupted');
+        setStatusText('Listening...');
+        interruptAnimationRef.current = requestAnimationFrame(detect);
+        return;
+      }
+
+      interruptAnimationRef.current = requestAnimationFrame(detect);
+    };
+
+    interruptAnimationRef.current = requestAnimationFrame(detect);
+  };
+
+  const stopInterruptDetection = () => {
+    if (interruptAnimationRef.current) {
+      cancelAnimationFrame(interruptAnimationRef.current);
+      interruptAnimationRef.current = null;
     }
   };
 
   // =====================================================================
-  // CHAPTER 3: AI SPEECH CONTROLS
-  // Functions to safely start and stop the 3D Avatar from talking
+  // AI SPEECH CONTROLS
   // =====================================================================
 
   const setTutorSpeaking = (speaking) => {
     if (speaking) {
-      // AI started talking! Turn off the mic so it doesn't hear itself.
       if (tutorCooldownRef.current) {
         clearTimeout(tutorCooldownRef.current);
         tutorCooldownRef.current = null;
       }
       isTutorSpeakingRef.current = true;
+      stopRecognition();
+      startInterruptDetection();
     } else {
-      // AI stopped talking! Wait 600ms for the echo to fade, then turn mic back on.
+      isTutorSpeakingRef.current = false;
+      stopInterruptDetection();
+
       tutorCooldownRef.current = setTimeout(() => {
-        isTutorSpeakingRef.current = false;
         tutorCooldownRef.current = null;
-      }, 1200);
+        recognitionRestartRef.current = true;
+        startRecognition();
+        if (!isMutedRef.current) {
+          setStatusText('Session active');
+        }
+      }, COOLDOWN_DELAY);
     }
   };
 
@@ -173,12 +273,11 @@ const Page = () => {
     const avatar = avatarRef.current;
     if (!avatar) return;
     try {
-      // Brutally force the 3D model to stop animating and playing sound
       if (typeof avatar.stop === 'function') await avatar.stop();
       if (typeof avatar.stopSpeaking === 'function') await avatar.stopSpeaking();
       if (typeof avatar.cancelSpeech === 'function') await avatar.cancelSpeech();
       if (avatar.audio) {
-        try { avatar.audio.pause(); avatar.audio.currentTime = 0; } catch { }
+        try { avatar.audio.pause(); avatar.audio.currentTime = 0; } catch {}
       }
     } catch (error) {
       console.error('Error stopping tutor speech:', error);
@@ -188,8 +287,7 @@ const Page = () => {
   };
 
   // =====================================================================
-  // CHAPTER 3.5: SEQUENTIAL CHUNK QUEUE
-  // Processes multiple ai_reply events one at a time: draw board → play audio → next
+  // SEQUENTIAL CHUNK QUEUE
   // =====================================================================
 
   const processNextItem = async () => {
@@ -205,7 +303,6 @@ const Page = () => {
     const data = itemQueueRef.current.shift();
 
     try {
-      // Draw board (if present) BEFORE audio starts
       if (data.boardresponse) {
         const board = boardRef.current;
         if (board) {
@@ -226,7 +323,6 @@ const Page = () => {
         }
       }
 
-      // Check if interrupted while board was drawing
       if (sessionStoppedRef.current) {
         setStatusText('Session active');
         isProcessingRef.current = false;
@@ -244,7 +340,6 @@ const Page = () => {
       setStatusText('Tutor speaking...');
       setTutorSpeaking(true);
 
-      // Decode audio
       const binaryString = atob(data.audio);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
@@ -264,7 +359,6 @@ const Page = () => {
         wdurations: data.wdurations || [],
       };
 
-      // Check if session stopped while decoding
       if (sessionStoppedRef.current) {
         setTutorSpeaking(false);
         setStatusText('Session active');
@@ -272,11 +366,11 @@ const Page = () => {
         return;
       }
 
-      // Speak with lip sync
       await avatar.speakAudio(
         audioObject,
         { lipsyncLang: 'en', pcmSampleRate: audioBuffer.sampleRate },
-        (subtitle) => { console.log('Subtitle:', subtitle); }
+        (subtitle) => { console.log('Subtitle:', subtitle); },
+        true
       );
 
       setTutorSpeaking(false);
@@ -327,220 +421,48 @@ const Page = () => {
     processNextItem();
   };
 
-  // =====================================================================
-  // CHAPTER 4: CLEANUP (Garbage Collection)
-  // Prevents your browser from crashing by safely destroying old memory
-  // =====================================================================
-
-  const cleanupSpeechDetection = () => {
-    // Kill all timers and loops
-    if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
-    if (tutorCooldownRef.current) clearTimeout(tutorCooldownRef.current);
-    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-
-    // Destroy the audio engine parts
-    if (processorRef.current) {
-      try { processorRef.current.disconnect(); } catch { }
-      processorRef.current = null;
-    }
-    analyserRef.current = null;
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
-    }
-    audioContextRef.current = null;
-
-    // Reset switches
-    isSpeakingRef.current = false;
-    isTutorSpeakingRef.current = false;
-    noiseFloorRef.current = 0;
-    calibrationFramesRef.current = 0;
+  const updateBoardPageState = () => {
+    const board = boardRef.current;
+    if (!board) return;
+    const cp = board.getCurrentPage?.() || 1;
+    const tp = board.getTotalPages?.() || 1;
+    boardCurrentPageRef.current = cp;
+    boardTotalPagesRef.current = tp;
+    setBoardCurrentPage(cp);
+    setBoardTotalPages(tp);
   };
 
-  const cleanupMic = () => {
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => track.stop());
-      micStreamRef.current = null;
+  const handleAvatarReady = useCallback((avatarInstance) => {
+    avatarRef.current = avatarInstance;
+    setIsTutorReady(true);
+  }, []);
+
+  const handleUploadDoc = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('sid', socket.id || '');
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/upload_doc`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setDocInfo(data);
+      }
+    } catch (err) {
+      console.error('Upload error:', err);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
     }
-    cleanupSpeechDetection();
-  };
-
-  // =====================================================================
-  // CHAPTER 5: THE MICROPHONE PIPELINE (The hardest part of the app)
-  // This takes raw audio, ignores background noise, chops it up, and sends it
-  // =====================================================================
-
-  const setupPCMStreaming = (stream) => {
-    // 1. Create the engine and connect the microphone
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    const source = audioContext.createMediaStreamSource(stream);
-
-    // 2. Setup the Analyser (measures the volume of specific frequencies)
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 1024; // Creates 512 slices of audio frequencies
-    source.connect(analyser);
-
-    // 3. Setup the Processor (Chops the audio into tiny chunks to send to Python)
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    source.connect(processor);
-    processor.connect(audioContext.destination); // something like connection speakers
-
-    // 🌟 THE "FIRST SYLLABLE" FIX: Keeps the last split-second of audio in memory
-    let lastAudioChunk = null;
-
-    // 4. The Chopping Loop: Runs constantly as audio flows in
-    processor.onaudioprocess = (event) => {
-      if (!isSessionActiveRef.current) return;
-      if (isMutedRef.current) return;
-
-      const input = event.inputBuffer.getChannelData(0);
-      const chunk = new Float32Array(input);
-
-      if (isSpeakingRef.current) {
-        // You are talking loud enough, send the audio normally!
-        socket.emit('audio_chunk', chunk.buffer);
-      } else {
-        // You are quiet, but keep the last split-second in memory just in case
-        lastAudioChunk = new Float32Array(chunk);
-      }
-    };
-
-    // 5. Isolating Human Voices: Calculate which frequency bins = human speech (300Hz–3400Hz).
-    const sampleRate = audioContext.sampleRate;
-    const binCount = analyser.frequencyBinCount;
-    const nyquist = sampleRate / 2;
-    const speechLowBin = Math.floor(300 / nyquist * binCount);
-    const speechHighBin = Math.floor(3400 / nyquist * binCount);
-    const dataArray = new Uint8Array(binCount);
-
-    audioContextRef.current = audioContext;
-    analyserRef.current = analyser;
-    processorRef.current = processor;
-
-    // 6. The Volume Loop (Voice Activity Detection): Runs 60 times a second
-    const detectSpeech = () => {
-      if (!analyserRef.current || !isSessionActiveRef.current) return;
-
-      // Look at the current volume of the room
-      analyserRef.current.getByteFrequencyData(dataArray);
-
-      // Measure RMS energy of human speech frequencies (ignores fans/hissing)
-      const speechBins = dataArray.slice(speechLowBin, speechHighBin);
-      const rms = Math.sqrt(speechBins.reduce((sum, v) => sum + v * v, 0) / speechBins.length);
-
-      // Phase A: Learn noise floor via exponential moving average
-      // Smoothly adapts to room noise — a single loud spike barely moves it.
-      if (calibrationFramesRef.current < CALIBRATION_FRAMES) {
-        noiseFloorRef.current = noiseFloorRef.current * 0.9 + rms * 0.1;
-        calibrationFramesRef.current++;
-        animationFrameRef.current = requestAnimationFrame(detectSpeech);
-        return;
-      }
-      // Only update noise floor when tutor is NOT speaking — locks baseline during AI playback
-      if (!isTutorSpeakingRef.current) {
-        noiseFloorRef.current = noiseFloorRef.current * 0.99 + rms * 0.01;
-      }
-
-      // Calculate the final target to beat (15% louder than background noise)
-      const threshold = Math.max(noiseFloorRef.current * NOISE_MULTIPLIER, 8);
-
-      // Phase B: Mute Guard
-      // If muted, don't send any audio and finalize any in-progress speech
-      if (isMutedRef.current) {
-        if (isSpeakingRef.current) {
-          isSpeakingRef.current = false;
-          setStatusText('Muted');
-          socket.emit('speech_ended');
-        }
-        if (silenceTimeoutRef.current) {
-          clearTimeout(silenceTimeoutRef.current);
-          silenceTimeoutRef.current = null;
-        }
-        animationFrameRef.current = requestAnimationFrame(detectSpeech);
-        return;
-      }
-
-      // Phase C: AI Guard (Interruptible)
-      // Once interrupted, threshold drops back to normal.
-      if (isTutorSpeakingRef.current) {
-        const interruptThreshold = noiseFloorRef.current;
-        console.log("My RMS", rms);
-        console.log("interruptThreshold", interruptThreshold);
-        if (rms > interruptThreshold) {
-          // Student interrupted! Stop tutor immediately
-          interruptedQueueBackupRef.current = itemQueueRef.current.splice(0);
-          isProcessingRef.current = false;
-          stopTutorSpeech();
-          interruptedRef.current = true;
-          if (tutorCooldownRef.current) {
-            clearTimeout(tutorCooldownRef.current);
-            tutorCooldownRef.current = null;
-          }
-          isTutorSpeakingRef.current = false;
-
-          socket.emit('user_interrupted');
-
-          // Begin capturing student speech immediately
-          isSpeakingRef.current = true;
-          setStatusText('Listening...');
-          socket.emit('speech_started');
-          if (lastAudioChunk) {
-            socket.emit('audio_chunk', lastAudioChunk.buffer);
-            lastAudioChunk = null;
-          }
-        }
-
-        if (silenceTimeoutRef.current) {
-          clearTimeout(silenceTimeoutRef.current);
-          silenceTimeoutRef.current = null;
-        }
-        animationFrameRef.current = requestAnimationFrame(detectSpeech);
-        return;
-      }
-
-      // Phase C: Listening!
-      if (rms > threshold) {
-        // Student is speaking loud enough!
-        console.log("The rms is", rms);
-        if (!isSpeakingRef.current) {
-          isSpeakingRef.current = true;
-          setStatusText('Listening...');
-          socket.emit('speech_started');
-
-          // 🌟 THE "FIRST SYLLABLE" FIX: Instantly send the memory buffer to the backend!
-          if (lastAudioChunk) {
-            socket.emit('audio_chunk', lastAudioChunk.buffer);
-            lastAudioChunk = null;
-          }
-        }
-        // If they were about to be marked "silent", cancel it because they kept talking
-        if (silenceTimeoutRef.current) {
-          clearTimeout(silenceTimeoutRef.current);
-          silenceTimeoutRef.current = null;
-        }
-      } else if (isSpeakingRef.current && !silenceTimeoutRef.current) {
-        // Volume dropped below threshold! Start a 1.2 second countdown.
-        // If they don't speak again before 1.2s, tell Python they finished their sentence.
-        silenceTimeoutRef.current = setTimeout(() => {
-          if (!isSessionActiveRef.current || sessionStoppedRef.current || isTutorSpeakingRef.current) {
-            silenceTimeoutRef.current = null;
-            return;
-          }
-          isSpeakingRef.current = false;
-          setStatusText('Processing...');
-          socket.emit('speech_ended'); // Send the audio to Whisper!
-          silenceTimeoutRef.current = null;
-        }, 700);
-      }
-
-      // Loop forever
-      animationFrameRef.current = requestAnimationFrame(detectSpeech);
-    };
-
-    detectSpeech();
   };
 
   // =====================================================================
-  // CHAPTER 6: START / STOP SESSION BUTTONS
+  // SESSION START / STOP
   // =====================================================================
 
   const startSession = async () => {
@@ -550,27 +472,33 @@ const Page = () => {
     try {
       sessionStoppedRef.current = false;
       isTutorSpeakingRef.current = false;
-      noiseFloorRef.current = 0;
-      calibrationFramesRef.current = 0;
+      speakingRef.current = false;
       setStatusText('Starting session...');
 
       if (!socket.connected) socket.connect();
       socket.emit('user_language', { lang: speakingLang });
 
-      // Ask user for Mic Permissions
       const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
-
       micStreamRef.current = micStream;
+
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(micStream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      audioContextRef.current = audioCtx;
+      analyserRef.current = analyser;
+
       isSessionActiveRef.current = true;
       setIsSessionActive(true);
 
-      setupPCMStreaming(micStream);
+      recognitionRestartRef.current = true;
+      startRecognition();
 
-      setStatusText('Calibrating mic...');
+      setStatusText('Session active');
 
-      // Tell Python what subject we are learning today
       const contextPayload = {
         topic: roomInfo.topic,
         prevCtx: roomInfo.prevCtx,
@@ -584,16 +512,10 @@ const Page = () => {
       } else {
         socket.once('connect', () => socket.emit('session_context', contextPayload));
       }
-
-      setTimeout(() => {
-        if (isSessionActiveRef.current && !sessionStoppedRef.current) setStatusText('Session active');
-      }, (CALIBRATION_FRAMES / 60) * 1000 + 200);
-
     } catch (error) {
       console.error('Error starting session:', error);
-      setStatusText(`Failed to start session: ${error.message}`);
-      cleanupMic();
-      if (socket.connected) socket.disconnect();
+      setStatusText(`Failed: ${error.message}`);
+      cleanupSession();
       isSessionActiveRef.current = false;
       setIsSessionActive(false);
     } finally {
@@ -605,33 +527,58 @@ const Page = () => {
     sessionStoppedRef.current = true;
     setStatusText('Stopping session...');
 
-    try {
-      itemQueueRef.current = [];
-      isProcessingRef.current = false;
-      interruptedQueueBackupRef.current = [];
+    itemQueueRef.current = [];
+    isProcessingRef.current = false;
+    interruptedQueueBackupRef.current = [];
+    speakingRef.current = false;
 
-      if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
-      if (tutorCooldownRef.current) clearTimeout(tutorCooldownRef.current);
-      silenceTimeoutRef.current = null;
+    stopRecognition();
+    stopInterruptDetection();
+    isTutorSpeakingRef.current = false;
+
+    if (tutorCooldownRef.current) {
+      clearTimeout(tutorCooldownRef.current);
       tutorCooldownRef.current = null;
-
-      isSpeakingRef.current = false;
-      isTutorSpeakingRef.current = false;
-
-      // Tell Python to delete any audio it was holding
-      if (socket.connected) socket.emit('session_cancelled');
-
-      await stopTutorSpeech();
-      cleanupMic();
-      if (socket.connected) socket.disconnect();
-
-      isSessionActiveRef.current = false;
-      setIsSessionActive(false);
-      setStatusText('Idle');
-    } catch (error) {
-      console.error('Error stopping session:', error);
-      setStatusText('Stop failed');
     }
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
+    if (socket.connected) socket.emit('session_cancelled');
+
+    await stopTutorSpeech();
+
+    cleanupSession();
+
+    if (socket.connected) socket.disconnect();
+
+    isSessionActiveRef.current = false;
+    setIsSessionActive(false);
+    setStatusText('Idle');
+  };
+
+  const cleanupSession = () => {
+    stopRecognition();
+    stopInterruptDetection();
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(t => t.stop());
+      micStreamRef.current = null;
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    if (tutorCooldownRef.current) {
+      clearTimeout(tutorCooldownRef.current);
+      tutorCooldownRef.current = null;
+    }
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+    speakingRef.current = false;
   };
 
   const toggleMute = () => {
@@ -640,17 +587,18 @@ const Page = () => {
     setIsMuted(newMuted);
     if (newMuted) {
       setStatusText('Muted');
-      // Finalize any in-progress speech so backend doesn't hang
-      if (isSpeakingRef.current) {
-        isSpeakingRef.current = false;
-        socket.emit('speech_ended');
+      if (speakingRef.current) {
+        speakingRef.current = false;
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
       }
-      if (silenceTimeoutRef.current) {
-        clearTimeout(silenceTimeoutRef.current);
-        silenceTimeoutRef.current = null;
-      }
+      stopRecognition();
     } else {
       setStatusText('Session active');
+      recognitionRestartRef.current = true;
+      startRecognition();
     }
   };
 
@@ -663,11 +611,9 @@ const Page = () => {
   };
 
   // =====================================================================
-  // CHAPTER 7: REACT LIFECYCLES (UseEffects)
-  // Stuff that runs automatically when the page loads
+  // REACT LIFECYCLES
   // =====================================================================
 
-  // 1. Fetch the Room details from FastAPI on load
   useEffect(() => {
     const fetchRoomInfo = async () => {
       if (!roomId) return;
@@ -692,7 +638,6 @@ const Page = () => {
     fetchRoomInfo();
   }, [roomId]);
 
-  // 2. Setup the WebSocket Listeners
   useEffect(() => {
     const handleConnect = () => {
       setStatusText((prev) => prev === 'Starting session...' ? 'Connected' : prev);
@@ -702,188 +647,199 @@ const Page = () => {
       setStatusText((prev) => isSessionActiveRef.current ? 'Disconnected' : 'Idle');
     };
 
-    // When Python sends EdgeTTS Audio back!
     const handleAIReply = (data) => {
       if (sessionStoppedRef.current) return;
-
       itemQueueRef.current.push(data);
-
-      if (!isProcessingRef.current) {
-        processNextItem();
-      }
+      if (!isProcessingRef.current) processNextItem();
     };
 
     const handleBoardImage = (data) => {
       if (sessionStoppedRef.current) return;
       const board = boardRef.current;
-      if (board?.displayBoardImage && data) {
-        board.displayBoardImage(data);
-      }
+      if (board?.displayBoardImage && data) board.displayBoardImage(data);
+    };
+
+    const handleQueueClear = () => {
+      itemQueueRef.current = [];
+      isProcessingRef.current = false;
     };
 
     socket.off('connect');
     socket.off('disconnect');
     socket.off('ai_reply');
     socket.off('board_image');
+    socket.off('queue_clear');
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('ai_reply', handleAIReply);
     socket.on('board_image', handleBoardImage);
+    socket.on('queue_clear', handleQueueClear);
 
     return () => {
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
       socket.off('ai_reply', handleAIReply);
       socket.off('board_image', handleBoardImage);
+      socket.off('queue_clear', handleQueueClear);
     };
   }, []);
 
-  // Sync docInfo to ref for use in socket closures
   useEffect(() => {
     docInfoRef.current = docInfo;
   }, [docInfo]);
 
-  // 3. Final Cleanup when leaving the page entirely
   useEffect(() => {
     return () => {
       sessionStoppedRef.current = true;
       isSessionActiveRef.current = false;
       stopTutorSpeech();
-      cleanupMic();
+      cleanupSession();
       if (socket.connected) socket.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // =====================================================================
-  // CHAPTER 8: RENDER (The HTML UI)
+  // RENDER
   // =====================================================================
 
   return (
-    <div className="h-screen bg-slate-50 flex flex-col overflow-hidden text-slate-900">
-      <header className="p-4 bg-white flex flex-wrap gap-2 justify-between items-center border-b border-slate-200 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className={`w-3 h-3 rounded-full ${isSessionActive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          <h1 className="font-bold text-lg text-slate-800">
-            Room: {roomId || 'Unknown'}
-          </h1>
-          <span className="w-px h-5 bg-slate-200" />
-          <label className={`cursor-pointer px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-            isUploading ? 'opacity-50 pointer-events-none bg-slate-100 text-slate-400' :
-            docInfo ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100' :
-            'bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100'
-          }`}>
-            {isUploading ? '⏳ Uploading...' : docInfo ? `📄 ${docInfo.filename}` : '📄 Upload Material'}
-            <input type="file" accept=".pdf" onChange={handleUploadDoc} className="hidden" disabled={isUploading} />
-          </label>
-          {isUploading && (
-            <div className="w-20 h-1 bg-slate-200 rounded-full overflow-hidden">
-              <div className="h-full bg-indigo-500 rounded-full animate-upload-bar" />
-            </div>
-          )}
-          {docInfo && (
-            <button onClick={() => { setDocInfo(null); }} className="text-xs text-red-400 hover:text-red-600 transition-colors" title="Remove document">
-              ✕
-            </button>
-          )}
-        </div>
-        {!isSessionActive && (
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Speak</span>
-              <select value={speakingLang} onChange={(e) => setSpeakingLang(e.target.value)}
-                className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300">
-                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Write</span>
-              <select value={writingLang} onChange={(e) => setWritingLang(e.target.value)}
-                className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300">
-                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </div>
-          </div>
-        )}
-        {isLoadingRoom ? (
-          <div className="px-4 py-1 rounded-full animate-pulse">
-            <div className="h-3 w-24 bg-slate-200 rounded-full" />
-          </div>
-        ) : (
-          <div className="px-4 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold uppercase tracking-widest border border-indigo-100">
-            {statusText}
-          </div>
-        )}
-      </header>
+    <div className="h-screen w-full relative flex flex-col overflow-hidden select-none"
+      style={{ background: 'linear-gradient(180deg, #F5F0E8 0%, #EDE5D8 60%, #E0D5C5 100%)' }}>
 
-      <main className="flex-1 relative p-2 sm:p-4 md:p-6 flex flex-col overflow-hidden">
-        <div className="flex-1 bg-white rounded-xl sm:rounded-2xl md:rounded-[2.5rem] border border-slate-200 relative overflow-hidden shadow-xl">
-          <div className="absolute top-2 left-2 sm:top-4 sm:left-4 md:top-6 md:left-6 z-10 bg-white/80 backdrop-blur-md px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 rounded-lg sm:rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
-            <p className="text-xs sm:text-sm font-bold text-slate-700 flex items-center gap-1 sm:gap-2">
-              <span className="text-indigo-600">●</span> AI Tutor
+      {/* ===== CEILING TRIM ===== */}
+      <div className="absolute top-0 left-0 right-0 h-3 pointer-events-none z-[1]"
+        style={{ background: 'linear-gradient(180deg, #D4C9B8, transparent)' }} />
+
+      {/* ===== FLOOR ===== */}
+      <div className="absolute bottom-0 left-0 right-0 h-[18vh] pointer-events-none z-[1]"
+        style={{ background: 'linear-gradient(180deg, #C4A882 0%, #B8956E 100%)' }}>
+        <div className="absolute inset-0 opacity-10"
+          style={{ background: 'repeating-linear-gradient(90deg, transparent, transparent 60px, #8B6914 60px, #8B6914 61px)' }} />
+      </div>
+      <div className="absolute bottom-[18vh] left-0 right-0 h-3 pointer-events-none z-[1]"
+        style={{ background: 'linear-gradient(180deg, #B8956E, #A07850)' }} />
+
+      {/* ===== LEFT WINDOW ===== */}
+      <div className="absolute top-[8%] left-[6%] w-[18%] h-[55%] rounded-t-2xl overflow-hidden border-2 pointer-events-none z-[1]"
+        style={{ borderColor: '#D4C9B8' }}>
+        <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, #E8F4F8 0%, #D4E8F0 100%)' }} />
+        <div className="absolute left-1/2 top-0 bottom-0 w-[3px]" style={{ background: '#D4C9B8' }} />
+        <div className="absolute top-1/2 left-0 right-0 h-[3px]" style={{ background: '#D4C9B8' }} />
+        <div className="absolute -right-10 top-0 w-20 h-full bg-amber-400/10 blur-3xl animate-sunlight" />
+        <div className="absolute top-0 left-0 right-0 h-4 bg-gradient-to-b from-amber-200/20 to-transparent" />
+      </div>
+
+      {/* ===== RIGHT WINDOW ===== */}
+      <div className="absolute top-[8%] right-[6%] w-[18%] h-[55%] rounded-t-2xl overflow-hidden border-2 pointer-events-none z-[1]"
+        style={{ borderColor: '#D4C9B8' }}>
+        <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, #E8F4F8 0%, #D4E8F0 100%)' }} />
+        <div className="absolute left-1/2 top-0 bottom-0 w-[3px]" style={{ background: '#D4C9B8' }} />
+        <div className="absolute top-1/2 left-0 right-0 h-[3px]" style={{ background: '#D4C9B8' }} />
+        <div className="absolute -left-10 top-0 w-20 h-full bg-amber-400/10 blur-3xl animate-sunlight" style={{ animationDelay: '-4s' }} />
+        <div className="absolute top-0 left-0 right-0 h-4 bg-gradient-to-b from-amber-200/20 to-transparent" />
+      </div>
+
+      {/* ===== SUNLIGHT RAYS ===== */}
+      <div className="absolute top-[15%] left-[10%] w-full h-[40%] pointer-events-none z-[1] overflow-hidden">
+        <div className="absolute top-0 left-0 w-[60%] h-full bg-gradient-to-r from-amber-300/5 to-transparent blur-3xl animate-sunlight"
+          style={{ transform: 'rotate(15deg)', transformOrigin: 'top left' }} />
+      </div>
+
+      {/* ===== CLOCK ===== */}
+      <div className="absolute top-[4%] right-[15%] w-[3.5%] aspect-square rounded-full bg-white/30 border border-white/10 flex items-center justify-center pointer-events-none z-[1]">
+        <div className="w-[2px] h-[30%] bg-amber-600/30 rounded-full absolute bottom-1/2 left-1/2 -translate-x-1/2 rotate-[45deg] origin-bottom" />
+        <div className="w-[2px] h-[22%] bg-amber-600/20 rounded-full absolute bottom-1/2 left-1/2 -translate-x-1/2 rotate-[90deg] origin-bottom" />
+      </div>
+
+      {/* ===== WALL ART ===== */}
+      <div className="absolute top-[6%] left-[1%] w-[4%] aspect-[3/4] border border-amber-300/10 rounded-sm pointer-events-none z-[1] flex items-center justify-center"
+        style={{ background: 'linear-gradient(135deg, rgba(251,191,36,0.05), rgba(245,158,11,0.08))' }}>
+        <svg className="w-4 h-4 text-amber-400/30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      </div>
+
+      {/* ===== TEACHER'S TABLE ===== */}
+      <div className="absolute bottom-[20%] left-[30%] right-[22%] h-[1.5%] rounded-sm pointer-events-none z-[1] shadow-md"
+        style={{ background: 'linear-gradient(180deg, #6B4226, #5C3A1E)' }} />
+      <div className="absolute bottom-[21.5%] left-[31%] right-[23%] h-[0.5%] pointer-events-none z-[1]"
+        style={{ background: '#4A2E15' }} />
+
+      {/* ===== BLACKBOARD FRAME (wooden) ===== */}
+      <div className="absolute top-[7%] left-[28%] right-[20%] bottom-[30%] rounded-lg overflow-hidden shadow-2xl z-[3]"
+        style={{ background: '#1A1A1A', border: '8px solid #5C3A1E' }}>
+        {/* Chalk tray */}
+        <div className="absolute -bottom-4 left-0 right-0 h-4 z-10"
+          style={{ background: 'linear-gradient(180deg, #5C3A1E, #4A2E15)', borderRadius: '0 0 4px 4px' }} />
+        {/* Board content */}
+        <div className="absolute inset-0">
+          {/* AI Tutor badge */}
+          <div className="absolute top-2 left-2 z-10 bg-white/10 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10">
+            <p className="text-xs font-bold text-amber-300/80 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse-ring" />
+              AI Tutor
             </p>
           </div>
-          <div className="w-full h-full bg-slate-100 relative">
-            <BoardCanvas
-              onReady={(boardInstance) => {
-                boardRef.current = boardInstance;
-                console.log('BoardCanvas instance received:', boardInstance);
+          <BoardCanvas
+            onReady={(boardInstance) => {
+              boardRef.current = boardInstance;
+              console.log('BoardCanvas instance received:', boardInstance);
+              updateBoardPageState();
+            }}
+          />
+          {/* Page controls */}
+          <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 text-white text-xs">
+            <button
+              onClick={() => {
+                boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
                 updateBoardPageState();
               }}
-            />
-            <div className="absolute bottom-4 right-4 z-20 flex items-center gap-2 sm:gap-3 bg-black/50 backdrop-blur-sm rounded-full px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 text-white text-xs sm:text-sm">
-              <button
-                onClick={() => {
-                  boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
-                  updateBoardPageState();
-                }}
-                disabled={boardCurrentPage <= 1}
-                className="disabled:opacity-30 hover:text-indigo-300 transition-colors"
-              >
-                ◀
-              </button>
-              <span className="font-medium min-w-[80px] text-center select-none">
-                {isSessionActive ? `Page ${boardCurrentPage}/${boardTotalPages}` : 'Board'}
-              </span>
-              <button
-                onClick={() => {
-                  boardRef.current?.navigateToPage?.(boardCurrentPage + 1);
-                  updateBoardPageState();
-                }}
-                disabled={boardCurrentPage >= boardTotalPages}
-                className="disabled:opacity-30 hover:text-indigo-300 transition-colors"
-              >
-                ▶
-              </button>
-              <span className="w-px h-4 bg-white/20 mx-1" />
-              <button
-                onClick={async () => {
-                  const board = boardRef.current;
-                  if (!board?.saveAllPages) return;
-                  const pages = board.saveAllPages();
-                  if (!pages || pages.length === 0) return;
-                  const { jsPDF } = await import('jspdf');
-                  const pdf = new jsPDF('l', 'mm', [297, 210]);
-                  pages.forEach((dataUrl, i) => {
-                    if (i > 0) pdf.addPage([297, 210]);
-                    pdf.addImage(dataUrl, 'PNG', 10, 10, 277, 190);
-                  });
-                  pdf.save('board.pdf');
-                }}
-                className="text-xs hover:text-indigo-300 transition-colors"
-                title="Save all board pages as PDF"
-              >
-                💾
-              </button>
-            </div>
+              disabled={boardCurrentPage <= 1}
+              className="disabled:opacity-30 hover:text-amber-300 transition-colors"
+            >◀</button>
+            <span className="font-medium min-w-[70px] text-center select-none">
+              {isSessionActive ? `Page ${boardCurrentPage}/${boardTotalPages}` : 'Board'}
+            </span>
+            <button
+              onClick={() => {
+                boardRef.current?.navigateToPage?.(boardCurrentPage + 1);
+                updateBoardPageState();
+              }}
+              disabled={boardCurrentPage >= boardTotalPages}
+              className="disabled:opacity-30 hover:text-amber-300 transition-colors"
+            >▶</button>
+            <span className="w-px h-3 bg-white/20 mx-0.5" />
+            <button
+              onClick={async () => {
+                const board = boardRef.current;
+                if (!board?.saveAllPages) return;
+                const pages = board.saveAllPages();
+                if (!pages || pages.length === 0) return;
+                const { jsPDF } = await import('jspdf');
+                const pdf = new jsPDF('l', 'mm', [297, 210]);
+                pages.forEach((dataUrl, i) => {
+                  if (i > 0) pdf.addPage([297, 210]);
+                  pdf.addImage(dataUrl, 'PNG', 10, 10, 277, 190);
+                });
+                pdf.save('board.pdf');
+              }}
+              className="text-xs hover:text-amber-300 transition-colors"
+              title="Save all board pages as PDF"
+            >💾</button>
           </div>
-          <div className="absolute bottom-14 sm:bottom-12 md:bottom-10 left-1/2 -translate-x-1/2 z-30 w-24 h-36 sm:w-36 sm:h-48 md:w-44 md:h-56 lg:w-56 lg:h-72 rounded-xl sm:rounded-2xl md:rounded-[2rem] overflow-hidden shadow-2xl">
+        </div>
+      </div>
+
+      {/* ===== TUTOR AVATAR (beside board) ===== */}
+      <div className="absolute bottom-[20%] right-[7%] w-[12%] aspect-[3/4] z-[3] flex flex-col items-center">
+        <div className="relative w-full h-full flex flex-col items-center">
+          {/* TalkingTutor container */}
+          <div className="relative w-full h-full rounded-t-full overflow-hidden shadow-2xl">
             {!isTutorReady && (
-              <div className="absolute inset-0 z-10 bg-slate-900/70 flex items-center justify-center rounded-[2rem]">
+              <div className="absolute inset-0 z-10 bg-[#0A0A0F]/70 flex items-center justify-center rounded-t-full">
                 <div className="text-center">
-                  <div className="w-12 h-12 border-4 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                  <p className="text-white text-sm font-medium">Loading avatar...</p>
+                  <div className="w-8 h-8 border-3 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                  <p className="text-white text-[10px] font-medium">Loading avatar...</p>
                 </div>
               </div>
             )}
@@ -893,37 +849,114 @@ const Page = () => {
             />
           </div>
         </div>
-      </main>
+        <div className="mt-1.5 text-[9px] font-mono tracking-wider text-amber-700/50 uppercase">AI Tutor</div>
+      </div>
 
-      <footer className="p-3 sm:p-4 md:p-6 bg-white border-t border-slate-200">
-        <div className="flex justify-center items-center gap-4">
-          <button
-            onClick={toggleMute}
-            disabled={!isSessionActive}
-            title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
-            className={`
-              p-2 sm:p-3 md:p-4 rounded-full font-bold text-xs sm:text-sm md:text-lg transition-all shadow-lg
-              ${!isSessionActive ? 'opacity-30 cursor-not-allowed' : 'hover:scale-105'}
-              ${isMuted ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}
-            `}
-          >
-            {isMuted ? '🔇' : '🎙️'}
-          </button>
-          <button
-            onClick={handleSessionToggle}
-            disabled={!isTutorReady && !isSessionActive}
-            className={`
-              px-4 py-2 sm:px-6 sm:py-3 md:px-8 md:py-4 rounded-full font-bold text-xs sm:text-sm md:text-lg transition-all shadow-lg
-              ${!isTutorReady && !isSessionActive ? 'opacity-50 cursor-not-allowed' : ''}
-              ${isSessionActive ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}
-            `}
-          >
-            {isSessionActive ? '⏹ Stop Session' : isTutorReady ? '▶ Start Session' : '⏳ Loading...'}
-          </button>
+      {/* ===== STATUS PILL ===== */}
+      <div className="absolute bottom-[7.5%] left-1/2 -translate-x-1/2 z-[5]">
+        {isLoadingRoom ? (
+          <div className="px-4 py-1.5 rounded-full backdrop-blur-md bg-white/40 border border-white/30 animate-pulse">
+            <div className="h-2.5 w-20 bg-amber-200/40 rounded-full" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full backdrop-blur-md bg-white/40 border border-white/30">
+            <span className={`w-1.5 h-1.5 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500 animate-glow-pulse'}`} />
+            <span className="text-[11px] font-mono text-amber-800/60 tracking-wider uppercase">{statusText}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ===== FLOATING CONTROLS BAR ===== */}
+      <div className="absolute bottom-[2%] left-1/2 -translate-x-1/2 z-[5] w-[92%] max-w-4xl">
+        <div className="backdrop-blur-2xl bg-[#0A0A0F]/80 rounded-2xl border border-white/[0.06] px-5 py-3 shadow-2xl flex items-center justify-between gap-3 flex-wrap">
+          
+          {/* Left: Room info + Language */}
+          <div className="flex items-center gap-3">
+            <div className="hidden sm:flex items-center gap-2 pr-3 border-r border-white/[0.06]">
+              <span className={`w-2 h-2 rounded-full ${isSessionActive ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500/50'}`} />
+              <span className="text-xs font-mono text-amber-200/50 tracking-tight">Room: {roomId?.substring(0, 8) || '---'}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono tracking-wider uppercase text-amber-300/50">Speak</span>
+              <select value={speakingLang} onChange={(e) => setSpeakingLang(e.target.value)}
+                disabled={isSessionActive}
+                className="bg-white/[0.04] border border-white/[0.08] rounded-lg px-2 py-1.5 text-xs text-amber-200/70 focus:outline-none focus:border-amber-400/30 appearance-none cursor-pointer disabled:opacity-40">
+                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value} className="bg-[#0A0A0F]">{o.label}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono tracking-wider uppercase text-amber-300/50">Write</span>
+              <select value={writingLang} onChange={(e) => setWritingLang(e.target.value)}
+                className="bg-white/[0.04] border border-white/[0.08] rounded-lg px-2 py-1.5 text-xs text-amber-200/70 focus:outline-none focus:border-amber-400/30 appearance-none cursor-pointer">
+                {LANG_OPTIONS.map(o => <option key={o.value} value={o.value} className="bg-[#0A0A0F]">{o.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Right: Upload + Session controls */}
+          <div className="flex items-center gap-2">
+            {/* Upload */}
+            <label className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all cursor-pointer
+              ${isUploading ? 'opacity-50 pointer-events-none border-white/[0.04] text-amber-200/30' :
+              docInfo ? 'border-emerald-400/20 text-emerald-300/70 bg-emerald-400/5' :
+              'border-white/[0.08] text-amber-200/50 hover:bg-white/[0.04] hover:text-amber-200'}`}>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+              {isUploading ? 'Uploading...' : docInfo ? docInfo.filename?.substring(0, 12) + '...' : 'PDF'}
+              <input type="file" accept=".pdf" onChange={handleUploadDoc} className="hidden" disabled={isUploading} />
+            </label>
+            {docInfo && (
+              <button onClick={() => { setDocInfo(null); }} className="text-xs text-amber-200/30 hover:text-red-400 transition-colors px-1" title="Remove document">✕</button>
+            )}
+            {isUploading && (
+              <div className="w-12 h-1 bg-white/[0.04] rounded-full overflow-hidden">
+                <div className="h-full bg-amber-400/60 rounded-full animate-upload-bar" />
+              </div>
+            )}
+
+            <span className="w-px h-5 bg-white/[0.06]" />
+
+            {/* Mute */}
+            <button
+              onClick={toggleMute}
+              disabled={!isSessionActive}
+              title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+              className={`w-8 h-8 rounded-lg border flex items-center justify-center text-xs transition-all
+                ${!isSessionActive ? 'opacity-20 cursor-not-allowed border-white/[0.04]' :
+                isMuted ? 'border-red-400/30 text-red-400/60 bg-red-400/5' :
+                'border-white/[0.08] text-amber-200/50 hover:border-amber-400/30 hover:text-amber-200 bg-white/[0.04]'}`}
+            >
+              {isMuted ? '🔇' : '🎙️'}
+            </button>
+
+            {/* Start / Stop Session */}
+            <button
+              onClick={handleSessionToggle}
+              disabled={!isTutorReady && !isSessionActive}
+              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold transition-all shadow-lg
+                ${!isTutorReady && !isSessionActive ? 'opacity-30 cursor-not-allowed' : 'hover:-translate-y-0.5 active:scale-95'}
+                ${isSessionActive
+                  ? 'bg-red-500/80 text-white hover:bg-red-500/90 shadow-red-500/20'
+                  : 'bg-white text-[#0A0A0F] hover:bg-white/90 shadow-amber-500/20'}`}
+            >
+              {isSessionActive ? '⏹ Stop' : isTutorReady ? '▶ Start' : '⏳'}
+            </button>
+          </div>
+
         </div>
-      </footer>
+      </div>
+
     </div>
   );
 };
 
-export default Page;
+export default function Page() {
+  return (
+    <Suspense fallback={
+      <div className="h-screen bg-[#F5F0E8] flex items-center justify-center">
+        <div className="text-amber-200/60 text-sm font-medium">Loading room...</div>
+      </div>
+    }>
+      <RoomContent />
+    </Suspense>
+  );
+}
