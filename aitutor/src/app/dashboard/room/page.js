@@ -75,7 +75,9 @@ function RoomContent() {
   const boardTotalPagesRef = useRef(0);
 
   const [speakingLang, setSpeakingLang] = useState('en');
+  const speakingLangRef = useRef('en');
   const [writingLang, setWritingLang] = useState('en');
+  const writingLangRef = useRef('en');
   const LANG_OPTIONS = [
     { value: 'en', label: 'English' },
     { value: 'hi', label: 'Hindi' },
@@ -89,6 +91,11 @@ function RoomContent() {
     { value: 'te', label: 'Telugu' },
     { value: 'ur', label: 'Urdu' },
   ];
+
+  useEffect(() => { speakingLangRef.current = speakingLang; }, [speakingLang]);
+  useEffect(() => { writingLangRef.current = writingLang; }, [writingLang]);
+
+  const restartRecognitionRef = useRef(null);
 
   useEffect(() => {
     if (socket.connected) {
@@ -114,7 +121,7 @@ function RoomContent() {
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = speakingLang + '-IN';
+    recognition.lang = speakingLangRef.current + '-IN';
     recognition.maxAlternatives = 1;
 
     recognition.onresult = (event) => {
@@ -154,18 +161,19 @@ function RoomContent() {
         return;
       }
       if (recognitionRestartRef.current && isSessionActiveRef.current && !sessionStoppedRef.current) {
-        setTimeout(() => startRecognition(), 500);
+        setTimeout(() => restartRecognitionRef.current?.(), 500);
       }
     };
 
     recognition.onend = () => {
       if (recognitionRestartRef.current && isSessionActiveRef.current && !sessionStoppedRef.current && !isTutorSpeakingRef.current) {
-        setTimeout(() => startRecognition(), 100);
+        setTimeout(() => restartRecognitionRef.current?.(), 100);
       }
     };
 
     recognition.start();
     recognitionRef.current = recognition;
+    restartRecognitionRef.current = startRecognition;
   };
 
   const stopRecognition = () => {
@@ -765,67 +773,69 @@ function RoomContent() {
       <div className="absolute bottom-[21.5%] left-[31%] right-[23%] h-[0.5%] pointer-events-none z-[1]"
         style={{ background: '#4A2E15' }} />
 
-      {/* ===== BLACKBOARD FRAME (wooden) ===== */}
-      <div className="absolute top-[7%] left-[28%] right-[20%] bottom-[30%] rounded-lg overflow-hidden shadow-2xl z-[3]"
-        style={{ background: '#1A1A1A', border: '8px solid #5C3A1E' }}>
-        {/* Chalk tray */}
-        <div className="absolute -bottom-4 left-0 right-0 h-4 z-10"
-          style={{ background: 'linear-gradient(180deg, #5C3A1E, #4A2E15)', borderRadius: '0 0 4px 4px' }} />
-        {/* Board content */}
-        <div className="absolute inset-0">
-          {/* AI Tutor badge */}
-          <div className="absolute top-2 left-2 z-10 bg-white/10 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10">
-            <p className="text-xs font-bold text-amber-300/80 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse-ring" />
-              AI Tutor
-            </p>
-          </div>
-          <BoardCanvas
-            onReady={(boardInstance) => {
-              boardRef.current = boardInstance;
-              console.log('BoardCanvas instance received:', boardInstance);
-              updateBoardPageState();
-            }}
-          />
-          {/* Page controls */}
-          <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 text-white text-xs">
-            <button
-              onClick={() => {
-                boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
+      {/* ===== BLACKBOARD FRAME (wooden) — 4:3 aspect ratio matching BoardCanvas (800×600) ===== */}
+      <div className="absolute top-[7%] left-[28%] right-[20%] bottom-[30%] flex items-center justify-center z-[3] pointer-events-none">
+        <div className="w-full h-full max-w-[52%] max-h-[63%] aspect-[4/3] rounded-lg overflow-hidden shadow-2xl pointer-events-auto"
+          style={{ background: '#1A1A1A', border: '8px solid #5C3A1E' }}>
+          {/* Chalk tray */}
+          <div className="absolute -bottom-4 left-0 right-0 h-4 z-10"
+            style={{ background: 'linear-gradient(180deg, #5C3A1E, #4A2E15)', borderRadius: '0 0 4px 4px' }} />
+          {/* Board content */}
+          <div className="absolute inset-0">
+            {/* AI Tutor badge */}
+            <div className="absolute top-2 left-2 z-10 bg-white/10 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10">
+              <p className="text-xs font-bold text-amber-300/80 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse-ring" />
+                AI Tutor
+              </p>
+            </div>
+            <BoardCanvas
+              onReady={(boardInstance) => {
+                boardRef.current = boardInstance;
+                console.log('BoardCanvas instance received:', boardInstance);
                 updateBoardPageState();
               }}
-              disabled={boardCurrentPage <= 1}
-              className="disabled:opacity-30 hover:text-amber-300 transition-colors"
-            >◀</button>
-            <span className="font-medium min-w-[70px] text-center select-none">
-              {isSessionActive ? `Page ${boardCurrentPage}/${boardTotalPages}` : 'Board'}
-            </span>
-            <button
-              onClick={() => {
-                boardRef.current?.navigateToPage?.(boardCurrentPage + 1);
-                updateBoardPageState();
-              }}
-              disabled={boardCurrentPage >= boardTotalPages}
-              className="disabled:opacity-30 hover:text-amber-300 transition-colors"
-            >▶</button>
-            <span className="w-px h-3 bg-white/20 mx-0.5" />
-            <button
-              onClick={async () => {
-                const board = boardRef.current;
-                if (!board?.saveAllPages) return;
-                const pages = board.saveAllPages();
-                if (!pages || pages.length === 0) return;
-                const { jsPDF } = await import('jspdf');
-                const pdf = new jsPDF('l', 'mm', [297, 210]);
-                pages.forEach((dataUrl, i) => {
-                  if (i > 0) pdf.addPage([297, 210]);
-                  pdf.addImage(dataUrl, 'PNG', 10, 10, 277, 190);
-                });
-                pdf.save('board.pdf');
-              }}
-              className="text-xs hover:text-amber-300 transition-colors"
-              title="Save all board pages as PDF"
-            >💾</button>
+            />
+            {/* Page controls */}
+            <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 text-white text-xs">
+              <button
+                onClick={() => {
+                  boardRef.current?.navigateToPage?.(boardCurrentPage - 1);
+                  updateBoardPageState();
+                }}
+                disabled={boardCurrentPage <= 1}
+                className="disabled:opacity-30 hover:text-amber-300 transition-colors"
+              >◀</button>
+              <span className="font-medium min-w-[70px] text-center select-none">
+                {isSessionActive ? `Page ${boardCurrentPage}/${boardTotalPages}` : 'Board'}
+              </span>
+              <button
+                onClick={() => {
+                  boardRef.current?.navigateToPage?.(boardCurrentPage + 1);
+                  updateBoardPageState();
+                }}
+                disabled={boardCurrentPage >= boardTotalPages}
+                className="disabled:opacity-30 hover:text-amber-300 transition-colors"
+              >▶</button>
+              <span className="w-px h-3 bg-white/20 mx-0.5" />
+              <button
+                onClick={async () => {
+                  const board = boardRef.current;
+                  if (!board?.saveAllPages) return;
+                  const pages = board.saveAllPages();
+                  if (!pages || pages.length === 0) return;
+                  const { jsPDF } = await import('jspdf');
+                  const pdf = new jsPDF('l', 'mm', [297, 210]);
+                  pages.forEach((dataUrl, i) => {
+                    if (i > 0) pdf.addPage([297, 210]);
+                    pdf.addImage(dataUrl, 'PNG', 10, 10, 277, 190);
+                  });
+                  pdf.save('board.pdf');
+                }}
+                className="text-xs hover:text-amber-300 transition-colors"
+                title="Save all board pages as PDF"
+              >💾</button>
+            </div>
           </div>
         </div>
       </div>

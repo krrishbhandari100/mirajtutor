@@ -426,7 +426,6 @@ async def user_language(sid, data):
     lang = data.get('lang', 'en') if isinstance(data, dict) else data
     ctx = session_contexts.get(sid, {})
     ctx['speaking_lang'] = lang
-    ctx['writing_lang'] = lang
     session_contexts[sid] = ctx
     welcome_text = WELCOME_TEXTS.get(lang, WELCOME_TEXTS['en'])
     payload = await build_ai_reply_payload(welcome_text, lang=lang)

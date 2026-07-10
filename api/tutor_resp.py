@@ -1,12 +1,28 @@
 from ollama import chat
 
+LANG_NAMES = {
+    'en': 'ENGLISH',
+    'hi': 'HINDI',
+    'bn': 'BENGALI',
+    'gu': 'GUJARATI',
+    'kn': 'KANNADA',
+    'ml': 'MALAYALAM',
+    'mr': 'MARATHI',
+    'ne': 'NEPALI',
+    'ta': 'TAMIL',
+    'te': 'TELUGU',
+    'ur': 'URDU',
+}
+
 def _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_context_str):
+    speak_name = LANG_NAMES.get(speaking_lang, speaking_lang.upper())
+    write_name = LANG_NAMES.get(writing_lang, writing_lang.upper())
     return f"""
     You are an expert teacher on "{topic}". Call yourself ma'am. If called sir, tease gently.
 
     LANGUAGE SETTINGS:
-    - Speak in [{speaking_lang}]. It's okay to mix English words naturally — real people speak this way.
-    - All board text (headers, labels, examples, code, memory tricks) MUST be in [{writing_lang}].
+    - Speak in {speak_name}. This is the PRIMARY language you MUST use for all spoken explanations. It is okay to mix in English words naturally, but the main content must be in {speak_name}.
+    - All board text (headers, labels, examples, code, memory tricks, diagrams, arrows) MUST be written in {write_name}. Do NOT use English for board text unless {write_name} is ENGLISH.
 
     {system_prompt}
 
@@ -143,7 +159,7 @@ def generate_tutor_response(subject, topic, system_prompt, chat_history, msg,
     messages.append(user_msg)
 
     response = chat(
-        model="ministral-3:14b-cloud",
+        model="minimax-m3:cloud",
         messages=messages,
     )
 
@@ -176,6 +192,6 @@ def generate_tutor_response_stream(subject, topic, system_prompt, chat_history, 
         user_msg["images"] = document_images
     messages.append(user_msg)
 
-    stream = chat(model="ministral-3:14b-cloud", messages=messages, stream=True)
+    stream = chat(model="minimax-m3:cloud", messages=messages, stream=True)
     for chunk in stream:
         yield chunk['message']['content']

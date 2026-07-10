@@ -122,11 +122,6 @@ const Page = () => {
               <span className="mx-4 flex-shrink text-xs font-semibold uppercase text-amber-200/40">Or use Google</span>
               <div className="flex-grow border-t border-white/[0.06]"></div>
             </div>
-
-            <button type="button" className="flex w-full items-center justify-center gap-3 rounded-full border border-white/[0.06] bg-white/[0.02] py-3 text-sm font-semibold text-amber-200/70 transition-all hover:bg-white/[0.05]">
-              <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="h-5 w-5" alt="Google" />
-              Sign up with Google
-            </button>
           </form>
 
           <p className="text-center text-sm text-amber-200/50">
