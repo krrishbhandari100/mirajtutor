@@ -1,0 +1,8 @@
+{
+  "buildCommand": "pip install -r requirements.txt",
+  "functions": {
+    "main.py": {
+      "runtime": "python"
+    }
+  }
+}
