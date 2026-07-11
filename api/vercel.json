@@ -1,7 +1,5 @@
 {
   "functions": {
-    "api/app.py": {
-      "runtime": "python@3.12"
-    }
+    "api/app.py": {}
   }
 }
