@@ -1,10 +1,10 @@
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.1
 aiosignal==1.4.0
-aiosqlite==0.22.1
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.14.1
+asyncpg==0.30.0
 attrs==26.1.0
 bcrypt==5.0.0
 bidict==0.23.1
@@ -26,6 +26,7 @@ multidict==6.7.1
 ollama==0.6.2
 packaging==26.2
 propcache==0.5.2
+psycopg2==2.9.12
 pydantic==2.13.4
 pydantic_core==2.46.4
 PyJWT==2.13.0

@@ -28,21 +28,29 @@ class User(SQLModel, table=True):
 
 class Room(SQLModel, table=True):
     roomId: str | None = Field(default=None, primary_key=True)
-    userId: int | None = Field(default=None, foreign_key="user.userId", ondelete="SET NULL")
+    userId: str | None = Field(default=None, foreign_key="user.userId", ondelete="SET NULL")
     roomname: str
     topic: str = Field(default=None)
     prompt: str = Field(default=None)
 
 
-sqlite_url = "sqlite+aiosqlite:///aiTutordb.db"
-engine = create_async_engine(sqlite_url, echo=True)
+DATABASE_URL = environ.get("DATABASE_URL", "sqlite+aiosqlite:///aiTutordb.db")
+print(f"🔍 Using DATABASE_URL: {DATABASE_URL}")
 
+connect_args = {}
+if DATABASE_URL.startswith("postgresql"):
+    # Required if you're using Supabase's Transaction pooler (port 6543).
+    # Safe to leave in even for direct/session connections.
+    connect_args = {"statement_cache_size": 0}
 
-@event.listens_for(engine.sync_engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+engine = create_async_engine(DATABASE_URL, echo=True, connect_args=connect_args)
+
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 async def init_db():
