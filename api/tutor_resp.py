@@ -96,13 +96,13 @@ def _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_conte
     - erase:   {{"type":"erase","target":"last"|"all"|"index","index":int}}
     - clear:   {{"type":"clear"}}
 
-    COORDINATES: x=0-800, y=0-600. y steps: 60,110,160,210,260,310,360,410,460,510. Max y=540. Left margin ~50, right ~750.
+    COORDINATES: x=0-800, y=0-600. Content starts at y≈120. y steps: 120, 170, 220, 270, 320, 370, 420, 470, 520. Max y=540.
 
     LAYOUT ZONES:
-    - Left (x=50-350, y=60-300): headings, notes (white/yellow)
-    - Right (x=400-750, y=60-300): memory tricks (green), examples (orange)
-    - Bottom (y=350-540): diagrams
-    Use full canvas. Spread out.
+    - Main Heading (y ≈ 60): Centered, full width. No split. Always use a single 'header' command for the main heading per page.
+    - LEFT ZONE (x = 40 to 380, y = 120 to 540): All text blocks ('text') and any sub-headings ('header'). Keep text sentences short (max 30-40 chars per line) so they never overflow past x=380.
+    - RIGHT ZONE (x = 420 to 760, y = 120 to 540): All figures and diagrams ('line', 'arrow', 'rect', 'circle', 'curve'). Every coordinate (x1, x2, cx, rect x+w, curve points' x) MUST be in 420 to 760. Keep width/radius small (e.g., rect w <= 300, circle r <= 150) so figures never cross to the left of x=420.
+    Never overlap text and figures.
 
     ERASE BEHAVIOR:
     - Wrong answer → erase last, draw correct in green (#4CAF50) or mark mistake in red (#FF5252)
