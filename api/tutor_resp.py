@@ -8,10 +8,8 @@ LANG_NAMES = {
     'kn': 'KANNADA',
     'ml': 'MALAYALAM',
     'mr': 'MARATHI',
-    'ne': 'NEPALI',
     'ta': 'TAMIL',
     'te': 'TELUGU',
-    'ur': 'URDU',
 }
 
 def _build_prompt(topic, system_prompt, speaking_lang, writing_lang, board_context_str):

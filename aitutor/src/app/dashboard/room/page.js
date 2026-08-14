@@ -86,10 +86,8 @@ function RoomContent() {
     { value: 'kn', label: 'Kannada' },
     { value: 'ml', label: 'Malayalam' },
     { value: 'mr', label: 'Marathi' },
-    { value: 'ne', label: 'Nepali' },
     { value: 'ta', label: 'Tamil' },
     { value: 'te', label: 'Telugu' },
-    { value: 'ur', label: 'Urdu' },
   ];
 
   useEffect(() => { speakingLangRef.current = speakingLang; }, [speakingLang]);

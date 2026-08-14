@@ -266,23 +266,19 @@ TTS_VOICES = {
     "mr": "mr-IN-AarohiNeural",
     "ta": "ta-IN-PallaviNeural",
     "te": "te-IN-ShrutiNeural",
-    "ur": "ur-IN-GulNeural",
-    "ne": "ne-NP-HemkalaNeural",
     "en": "en-IN-NeerjaNeural",
 }
 
 WELCOME_TEXTS = {
     "en": "Hello! Welcome to MirajTutor. I'm your AI tutor. What would you like to learn today?",
-    "hi": "Namaste! MirajTutor mein aapka swagat hai. Main aapki AI tutor hoon. Aaj aap kya seekhna chahenge?",
-    "bn": "Nomoshkar! MirajTutor-e apnake swagatom. Ami apnar AI tutor. Aaj aap ki shikhte chaan?",
-    "gu": "Namaste! MirajTutor ma aapno swagat che. Hu aapni AI tutor chhu. Aaj tame shu shikhecha?",
-    "kn": "Namaskara! MirajTutor-ge suswagata. Naanu nimma AI tutor. Ivattu neevu yenannu kaliyalike bayasuviri?",
-    "ml": "Namaskaram! MirajTutor-il swagatam. Njan ningalude AI tutor aanu. Innu ningalkk enthu padikkanam?",
-    "mr": "Namaskar! MirajTutor madhye aaple swagat ahe. Mi tumchi AI tutor ahe. Aaj tumhi kaya shiknyacha aahe?",
-    "ne": "Namaste! MirajTutor-ma swagat chha. Ma timro AI tutor hu. Aaja timi ke sikna chahanchhau?",
-    "ta": "Vanakkam! MirajTutor-kku varaveRkkiRom. Naan ungaL AI tutor. InRu neenga enna kaRRa virumbugiRgiRkaL?",
-    "te": "Namaskaram! MirajTutor-ki suswagatam. Nenu mee AI tutor. IvuDu miru emi nerchukOvasukunnAru?",
-    "ur": "Aadaab! MirajTutor mein aapka istaqbaal hai. Main aapki AI tutor hoon. Aaj aap kya seekhna chahenge?",
+    "hi": "नमस्ते! मिराजट्यूटर में आपका स्वागत है। मैं आपकी AI ट्यूटर हूँ। आज आप क्या सीखना चाहेंगे?",
+    "bn": "নমস্কার! মিরাজটউটরে আপনাকে স্বাগত। আমি আপনার AI টিউটর। আজ আপনি কি শিখতে চান?",
+    "gu": "નમસ્તે! મિરાજટ્યુટરમાં આપનું સ્વાગત છે. હું તમારી AI ટ્યુટર છું. આજે તમે શું શીખવા માંગો છો?",
+    "kn": "ನಮಸ್ಕಾರ! ಮಿರಾಜ್‌ಟ್ಯೂಟರ್‌ಗೆ ಸುಸ್ವಾಗತ. ನಾನು ನಿಮ್ಮ AI ಟ್ಯೂಟರ್. ಇಂದು ನೀವು ಏನನ್ನು ಕಲಿಯಲು ಬಯಸುತ್ತೀರಿ?",
+    "ml": "നമസ്കാരം! മിരാജ്‌ട്യൂട്ടറിലേക്ക് സ്വാഗതം. ഞാൻ നിങ്ങളുടെ AI ട്യൂട്ടർ ആണ്. ഇന്ന് നിങ്ങൾക്ക് എന്താണ് പഠിക്കേണ്ടത്?",
+    "mr": "नमस्कार! मिराजट्युटर मध्ये आपले स्वागत आहे. मी तुमची AI ट्युटर आहे. आज तुम्ही काय शिकू इच्छिता?",
+    "ta": "வணக்கம்! மிராஜ்ટூட்டருக்கு உங்களை வரவேற்கிறோம். நான் உங்கள் AI ஆசிரியர். இன்று நீங்கள் என்ன கற்றுக்கொள்ள விரும்புகிறீர்கள்?",
+    "te": "నమస్కారం! మిరాజ్ ట్యూటర్‌కు సుస్వాగతం. నేను మీ AI ట్యూటర్. ఈరోజు మీరు ఏమి నేర్చుకోవాలనుకుంటున్నారు?",
 }
 
 

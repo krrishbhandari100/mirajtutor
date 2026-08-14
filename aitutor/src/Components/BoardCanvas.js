@@ -240,6 +240,7 @@ export default function BoardCanvas({ onReady }) {
     if (action === 'newpage') {
       boardPagesRef.current.push({ id: pageIdCounterRef.current++, commands: [] });
       targetPageIndex = boardPagesRef.current.length - 1;
+      currentPageIndexRef.current = targetPageIndex;
     } else if (action === 'gotopage') {
       const target = Number(boardresponse.page) || 1;
       if (target >= 1 && target <= boardPagesRef.current.length) {
